@@ -1,0 +1,14 @@
+{
+  "name": "shell_only",
+  "description": "Two-shell SOZ around selection A",
+  "root": {
+    "type": "shell",
+    "params": {
+      "selection_label": "selection_a",
+      "cutoffs": [3.5, 5.0],
+      "unit": "A",
+      "atom_mode": "O"
+    },
+    "children": []
+  }
+}

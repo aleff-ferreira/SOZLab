@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a reproducible bug in SOZLab
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for reporting a bug. Please provide enough detail to reproduce."
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide exact commands or GUI steps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, SOZLab version, MDAnalysis version.
+      value: |
+        - OS:
+        - Python:
+        - SOZLab:
+        - MDAnalysis:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: Paste relevant CLI output or `sozlab.log` excerpts.
+      render: text

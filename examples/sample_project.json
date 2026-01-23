@@ -1,0 +1,107 @@
+{
+  "version": "1.0",
+  "inputs": {
+    "topology": "examples/data/sample.pdb",
+    "trajectory": "examples/data/sample.pdb"
+  },
+  "solvent": {
+    "water_resnames": ["SOL"],
+    "water_oxygen_names": ["O", "OW"],
+    "water_hydrogen_names": ["H1", "H2"],
+    "ion_resnames": ["NA", "CL"],
+    "include_ions": false
+  },
+  "selections": {
+    "selection_a": {
+      "label": "selection_a",
+      "selection": "protein and resid 1 and name CA",
+      "require_unique": true
+    },
+    "selection_b": {
+      "label": "selection_b",
+      "selection": "protein and resid 1 and name CB",
+      "require_unique": true
+    }
+  },
+  "sozs": [
+    {
+      "name": "shell_only",
+      "description": "Two-shell SOZ around selection A",
+      "root": {
+        "type": "shell",
+        "params": {
+          "selection_label": "selection_a",
+          "cutoffs": [3.5, 5.0],
+          "unit": "A",
+          "atom_mode": "O"
+        },
+        "children": []
+      }
+    },
+    {
+      "name": "shell_and_selection_b",
+      "description": "Shell around selection A AND within distance of selection B",
+      "root": {
+        "type": "and",
+        "params": {},
+        "children": [
+          {
+            "type": "shell",
+            "params": {
+              "selection_label": "selection_a",
+              "cutoffs": [3.5, 5.0],
+              "unit": "A",
+              "atom_mode": "O"
+            },
+            "children": []
+          },
+          {
+            "type": "distance",
+            "params": {
+              "selection_label": "selection_b",
+              "cutoff": 4.0,
+              "unit": "A",
+              "atom_mode": "O"
+            },
+            "children": []
+          }
+        ]
+      }
+    }
+  ],
+  "analysis": {
+    "frame_start": 0,
+    "frame_stop": null,
+    "stride": 1,
+    "gap_tolerance": 1,
+    "store_ids": true,
+    "store_min_distances": true,
+    "preview_frames": 2
+  },
+  "outputs": {
+    "output_dir": "examples/output",
+    "write_per_frame": true,
+    "write_parquet": false,
+    "report_format": "md"
+  },
+  "bridges": [
+    {
+      "name": "bridge_A_B",
+      "selection_a": "selection_a",
+      "selection_b": "selection_b",
+      "cutoff_a": 3.5,
+      "cutoff_b": 4.0,
+      "unit": "A",
+      "atom_mode": "O"
+    }
+  ],
+  "residue_hydration": [
+    {
+      "name": "hydration_shell_only",
+      "residue_selection": "protein",
+      "cutoff": 3.5,
+      "unit": "A",
+      "soz_name": "shell_only"
+    }
+  ]
+}

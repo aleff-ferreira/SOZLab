@@ -1,0 +1,30 @@
+{
+  "name": "shell_and_selection_b",
+  "description": "Shell around selection A AND within distance of selection B",
+  "root": {
+    "type": "and",
+    "params": {},
+    "children": [
+      {
+        "type": "shell",
+        "params": {
+          "selection_label": "selection_a",
+          "cutoffs": [3.5, 5.0],
+          "unit": "A",
+          "atom_mode": "O"
+        },
+        "children": []
+      },
+      {
+        "type": "distance",
+        "params": {
+          "selection_label": "selection_b",
+          "cutoff": 4.0,
+          "unit": "A",
+          "atom_mode": "O"
+        },
+        "children": []
+      }
+    ]
+  }
+}

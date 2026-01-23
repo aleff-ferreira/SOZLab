@@ -1,0 +1,88 @@
+{
+  "version": "1.0",
+  "inputs": {
+    "topology": "/path/to/topol.tpr",
+    "trajectory": "/path/to/traj.xtc"
+  },
+  "solvent": {
+    "water_resnames": ["SOL", "WAT", "TIP3", "HOH"],
+    "water_oxygen_names": ["O", "OW", "OH2"],
+    "water_hydrogen_names": ["H1", "H2", "HW1", "HW2"],
+    "ion_resnames": ["NA", "CL"],
+    "include_ions": true
+  },
+  "selections": {
+    "selection_a": {
+      "label": "selection_a",
+      "selection": "protein and resid 10 and name CA",
+      "require_unique": true
+    },
+    "selection_b": {
+      "label": "selection_b",
+      "selection": "protein and resid 25 and name CB",
+      "require_unique": true
+    }
+  },
+  "sozs": [
+    {
+      "name": "shell_only",
+      "description": "Shell around selection A",
+      "root": {
+        "type": "shell",
+        "params": {
+          "selection_label": "selection_a",
+          "cutoffs": [3.5, 5.0],
+          "unit": "A",
+          "atom_mode": "O"
+        },
+        "children": []
+      }
+    },
+    {
+      "name": "shell_and_selection_b",
+      "description": "Shell around selection A AND within distance of selection B",
+      "root": {
+        "type": "and",
+        "children": [
+          {
+            "type": "shell",
+            "params": {
+              "selection_label": "selection_a",
+              "cutoffs": [3.5, 5.0],
+              "unit": "A",
+              "atom_mode": "O"
+            },
+            "children": []
+          },
+          {
+            "type": "distance",
+            "params": {
+              "selection_label": "selection_b",
+              "cutoff": 4.0,
+              "unit": "A",
+              "atom_mode": "O"
+            },
+            "children": []
+          }
+        ]
+      }
+    }
+  ],
+  "analysis": {
+    "frame_start": 0,
+    "frame_stop": null,
+    "stride": 1,
+    "gap_tolerance": 1,
+    "store_ids": true,
+    "store_min_distances": true,
+    "preview_frames": 200
+  },
+  "outputs": {
+    "output_dir": "results",
+    "write_per_frame": true,
+    "write_parquet": false,
+    "report_format": "md"
+  },
+  "bridges": [],
+  "residue_hydration": []
+}
