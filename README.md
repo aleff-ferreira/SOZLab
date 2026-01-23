@@ -68,5 +68,5 @@ Then load `examples/sample_project.json` and click **Run**.
 See `CITATION.cff`.
 
 ## License
-MIT (default; confirm if a different license is desired).
+MIT.
 
