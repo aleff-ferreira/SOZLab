@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sozlab"
+version = "0.1.1"
+description = "Linux GUI + CLI for GROMACS solvent occupancy zone analysis"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Aleff Ferreira Francisco"}]
+keywords = ["gromacs", "mdanalysis", "solvent", "occupancy", "soZ"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux"
+]
+dependencies = [
+  "MDAnalysis==2.9.0",
+  "numpy==1.26.4",
+  "pandas==2.2.2",
+  "PyQt6>=6.5,<6.8",
+  "pyqtgraph==0.13.7",
+  "matplotlib==3.9.2",
+  "pyyaml==6.0.2"
+]
+
+[project.optional-dependencies]
+parquet = ["pyarrow==17.0.0"]
+
+[project.scripts]
+sozlab-gui = "app.main:main"
+sozlab-cli = "cli.sozlab_cli:main"
+
+[tool.setuptools]
+packages = ["app", "engine", "cli"]
+package-dir = {"app" = "src/app", "engine" = "src/engine", "cli" = "cli"}
+
+[tool.pytest.ini_options]
+addopts = "-q"

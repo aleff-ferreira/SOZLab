@@ -1,0 +1,17 @@
+name: sozlab
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - numpy=1.26.4
+  - pandas=2.2.2
+  - mdanalysis=2.9.0
+  - pyqtgraph=0.13.7
+  - matplotlib=3.9.2
+  - pyyaml=6.0.2
+  - pyarrow=17.0.0
+  - pip
+  - pip:
+      - PyQt6>=6.5,<6.8
+      - -e .
