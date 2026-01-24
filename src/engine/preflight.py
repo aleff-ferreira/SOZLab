@@ -8,8 +8,10 @@ from typing import Dict, List
 
 import numpy as np
 import MDAnalysis as mda
+from MDAnalysis.exceptions import NoDataError
 
 from engine.models import ProjectConfig, SelectionSpec, SOZNode, BridgeConfig, ResidueHydrationConfig
+from engine.solvent import build_solvent, resolve_probe_mode
 from engine.units import to_internal_length
 
 logger = logging.getLogger("sozlab")
@@ -266,30 +268,19 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
     solvent_cfg = project.solvent
     resnames_present = sorted({str(res.resname) for res in universe.residues})
 
-    water_matches = []
-    water_residue_counts = {}
+    solvent_matches = []
+    solvent_residue_counts = {}
     for name in solvent_cfg.water_resnames:
         try:
             count = len(universe.select_atoms(f"resname {name}").residues)
         except Exception:
             count = 0
-        water_residue_counts[name] = count
+        solvent_residue_counts[name] = count
         if count > 0:
-            water_matches.append(name)
+            solvent_matches.append(name)
 
-    if not water_matches:
-        errors.append("Water resnames did not match any residues.")
-
-    oxygen_atom_count = 0
-    if water_matches:
-        water_sel = "resname " + " ".join(water_matches)
-        oxygen_sel = "name " + " ".join(solvent_cfg.water_oxygen_names)
-        try:
-            oxygen_atom_count = len(universe.select_atoms(f"{water_sel} and {oxygen_sel}"))
-        except Exception:
-            oxygen_atom_count = 0
-    if oxygen_atom_count == 0:
-        warnings.append("Water oxygen names did not match any atoms; O-mode will fall back to all atoms.")
+    if not solvent_matches:
+        errors.append("Solvent resnames did not match any residues.")
 
     ion_matches = []
     ion_counts = {}
@@ -305,12 +296,65 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
         if not ion_matches:
             warnings.append("Ion resnames did not match any residues.")
 
+    probe_summary = {
+        "selection": solvent_cfg.probe.selection,
+        "position": solvent_cfg.probe.position,
+        "probe_source": getattr(solvent_cfg, "probe_source", None),
+        "probe_atom_count": 0,
+        "residues_with_probe": 0,
+        "residues_multi_probe": 0,
+        "probe_atoms_per_residue_min": 0,
+        "probe_atoms_per_residue_max": 0,
+        "probe_residues_missing_count": 0,
+        "probe_residues_multi_count": 0,
+        "probe_residues_missing_sample": [],
+        "probe_residues_multi_sample": [],
+    }
+
+    if solvent_cfg.probe_source == "legacy_water_oxygen_names":
+        warnings.append(
+            "Probe selection derived from legacy water_oxygen_names; review probe settings for non-water solvents."
+        )
+
+    try:
+        resolve_probe_mode("probe", solvent_cfg.probe.position)
+        solvent = build_solvent(universe, solvent_cfg)
+        probe_counts = {
+            resindex: len(atom_indices)
+            for resindex, atom_indices in solvent.probe.resindex_to_atom_indices.items()
+        }
+        missing = [idx for idx, count in probe_counts.items() if count == 0]
+        multi = [idx for idx, count in probe_counts.items() if count > 1]
+        probe_summary.update(
+            {
+                "probe_atom_count": len(solvent.probe.atom_indices),
+                "residues_with_probe": sum(1 for count in probe_counts.values() if count > 0),
+                "residues_multi_probe": sum(1 for count in probe_counts.values() if count > 1),
+                "probe_atoms_per_residue_min": min(probe_counts.values()) if probe_counts else 0,
+                "probe_atoms_per_residue_max": max(probe_counts.values()) if probe_counts else 0,
+                "probe_residues_missing_count": len(missing),
+                "probe_residues_multi_count": len(multi),
+                "probe_residues_missing_sample": missing[:10],
+                "probe_residues_multi_sample": multi[:10],
+            }
+        )
+        if solvent.probe.position == "atom" and multi:
+            warnings.append(
+                "Probe selection matched multiple atoms per solvent residue; atom-mode distances may be ambiguous."
+            )
+        stable_ids = [record.stable_id for record in solvent.record_by_resindex.values()]
+        if len(stable_ids) != len(set(stable_ids)):
+            warnings.append(
+                "Solvent residues do not have unique IDs (resname:resid:segid duplicates detected)."
+            )
+    except Exception as exc:
+        errors.append(f"Solvent/probe validation failed: {exc}")
+
     solvent_summary = {
-        "water_resnames": solvent_cfg.water_resnames,
-        "water_residue_counts": water_residue_counts,
-        "water_matches": water_matches,
-        "water_oxygen_names": solvent_cfg.water_oxygen_names,
-        "oxygen_atom_count": oxygen_atom_count,
+        "solvent_resnames": solvent_cfg.water_resnames,
+        "solvent_residue_counts": solvent_residue_counts,
+        "solvent_matches": solvent_matches,
+        "probe_summary": probe_summary,
         "ion_resnames": solvent_cfg.ion_resnames,
         "ion_matches": ion_matches,
         "include_ions": solvent_cfg.include_ions,
@@ -328,20 +372,82 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
         for child in node.children:
             _check_node_units(child, errors_out)
 
+    def _check_node_modes(node: SOZNode, errors_out: List[str]) -> None:
+        if node.type in ("distance", "shell"):
+            raw_mode = node.params.get("probe_mode", node.params.get("atom_mode", "probe"))
+            try:
+                resolve_probe_mode(raw_mode, project.solvent.probe.position)
+            except Exception as exc:
+                errors_out.append(f"Unsupported probe mode '{raw_mode}' in node '{node.type}': {exc}")
+        for child in node.children:
+            _check_node_modes(child, errors_out)
+
+    def _collect_node_modes(node: SOZNode, modes: set[str]) -> None:
+        if node.type in ("distance", "shell"):
+            raw_mode = node.params.get("probe_mode", node.params.get("atom_mode", "probe"))
+            try:
+                modes.add(resolve_probe_mode(raw_mode, project.solvent.probe.position))
+            except Exception:
+                return
+        for child in node.children:
+            _collect_node_modes(child, modes)
+
     for soz in project.sozs:
         _check_node_units(soz.root, errors)
+        _check_node_modes(soz.root, errors)
 
     for bridge in project.bridges:
         try:
             to_internal_length(1.0, bridge.unit)
         except Exception:
             errors.append(f"Unsupported unit '{bridge.unit}' in bridge '{bridge.name}'.")
+        try:
+            resolve_probe_mode(bridge.atom_mode, project.solvent.probe.position)
+        except Exception as exc:
+            errors.append(
+                f"Unsupported probe mode '{bridge.atom_mode}' in bridge '{bridge.name}': {exc}"
+            )
 
     for cfg in project.residue_hydration:
         try:
             to_internal_length(1.0, cfg.unit)
         except Exception:
             errors.append(f"Unsupported unit '{cfg.unit}' in hydration '{cfg.name}'.")
+        if cfg.probe_mode is None:
+            warnings.append(
+                f"Hydration '{cfg.name}' probe_mode not set; defaulting to all solvent atoms."
+            )
+        else:
+            try:
+                resolve_probe_mode(cfg.probe_mode, project.solvent.probe.position)
+            except Exception as exc:
+                errors.append(
+                    f"Unsupported probe mode '{cfg.probe_mode}' in hydration '{cfg.name}': {exc}"
+                )
+
+    required_modes: set[str] = set()
+    for soz in project.sozs:
+        _collect_node_modes(soz.root, required_modes)
+    for bridge in project.bridges:
+        try:
+            required_modes.add(resolve_probe_mode(bridge.atom_mode, project.solvent.probe.position))
+        except Exception:
+            pass
+    for cfg in project.residue_hydration:
+        if cfg.probe_mode is None:
+            required_modes.add("all")
+        else:
+            try:
+                required_modes.add(resolve_probe_mode(cfg.probe_mode, project.solvent.probe.position))
+            except Exception:
+                pass
+    if "com" in required_modes:
+        try:
+            _ = universe.atoms.masses
+        except NoDataError:
+            errors.append(
+                "Probe position 'com' requires atom masses; add masses to topology or use COG."
+            )
 
     # Selection sanity
     selection_checks: Dict[str, SelectionCheck] = {}

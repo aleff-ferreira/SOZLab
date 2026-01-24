@@ -5,13 +5,18 @@ import json
 import threading
 import logging
 import os
+import sys
+import re
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Callable
 
 import pandas as pd
 import numpy as np
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets, QtPrintSupport
 import pyqtgraph as pg
 import pyqtgraph.exporters
 
@@ -23,6 +28,7 @@ from engine.models import (
     SelectionSpec,
     SOZDefinition,
     SOZNode,
+    ProbeConfig,
     SolventConfig,
     BridgeConfig,
     ResidueHydrationConfig,
@@ -494,23 +500,40 @@ class MainWindow(QtWidgets.QMainWindow):
                 font-weight: 600;
             }}
             QTabWidget::pane {{
-                border: 0;
+                border: 1px solid {border};
                 border-radius: {radius}px;
                 background: {surface};
+                top: -1px;
+            }}
+            QTabWidget::tab-bar {{
+                left: {pad}px;
+            }}
+            QTabBar {{
+                background: {panel};
+                border-bottom: 1px solid {border};
+                padding-left: {pad_sm}px;
             }}
             QTabBar::tab {{
                 background: {tab_bg};
                 border: 1px solid {border};
+                border-bottom-color: {border};
                 padding: {pad_sm}px {pad}px;
-                margin-right: 2px;
+                margin-right: 4px;
+                margin-top: 4px;
                 border-top-left-radius: {radius}px;
                 border-top-right-radius: {radius}px;
                 color: {text_muted};
+            }}
+            QTabBar::tab:hover {{
+                background: {panel};
+                color: {text};
             }}
             QTabBar::tab:selected {{
                 background: {surface};
                 color: {text};
                 border-color: {accent};
+                border-bottom-color: {surface};
+                margin-top: 0px;
             }}
             QStatusBar {{
                 background: {base};
@@ -1164,16 +1187,30 @@ class MainWindow(QtWidgets.QMainWindow):
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
         inputs_group = QtWidgets.QGroupBox("Inputs")
-        inputs_layout = QtWidgets.QVBoxLayout(inputs_group)
+        inputs_layout = QtWidgets.QGridLayout(inputs_group)
         self.topology_label = QtWidgets.QLabel("Topology: -")
         self.trajectory_label = QtWidgets.QLabel("Trajectory: -")
         self.metadata_label = QtWidgets.QLabel("Metadata: -")
+        self.topology_change_btn = QtWidgets.QPushButton("Change")
+        self.trajectory_change_btn = QtWidgets.QPushButton("Change")
+        self.trajectory_clear_btn = QtWidgets.QPushButton("Clear")
+        self.topology_change_btn.clicked.connect(self._browse_topology)
+        self.trajectory_change_btn.clicked.connect(self._browse_trajectory)
+        self.trajectory_clear_btn.clicked.connect(self._clear_trajectory)
         mono = QtGui.QFont("JetBrains Mono")
         for lbl in (self.topology_label, self.trajectory_label):
             lbl.setFont(mono)
         for lbl in (self.topology_label, self.trajectory_label, self.metadata_label):
             lbl.setWordWrap(True)
-            inputs_layout.addWidget(lbl)
+        inputs_layout.addWidget(self.topology_label, 0, 0)
+        inputs_layout.addWidget(self.topology_change_btn, 0, 1)
+        inputs_layout.addWidget(self.trajectory_label, 1, 0)
+        traj_btns = QtWidgets.QHBoxLayout()
+        traj_btns.addWidget(self.trajectory_change_btn)
+        traj_btns.addWidget(self.trajectory_clear_btn)
+        inputs_layout.addLayout(traj_btns, 1, 1)
+        inputs_layout.addWidget(self.metadata_label, 2, 0, 1, 2)
+        inputs_layout.setColumnStretch(0, 1)
         layout.addWidget(inputs_group)
 
         analysis_group = QtWidgets.QGroupBox("Analysis Window")
@@ -1220,6 +1257,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.report_format_combo.setToolTip("Report format for Export Report (html or md).")
         self.write_per_frame_check.setToolTip("Write per-frame CSV outputs to disk.")
         self.write_parquet_check.setToolTip("Write parquet outputs where supported.")
+        self.topology_change_btn.setToolTip("Select a different topology file.")
+        self.trajectory_change_btn.setToolTip("Select a different trajectory file.")
+        self.trajectory_clear_btn.setToolTip("Clear the trajectory path.")
 
         self.doctor_group = QtWidgets.QGroupBox("Project Doctor")
         doctor_layout = QtWidgets.QVBoxLayout(self.doctor_group)
@@ -1490,11 +1530,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_timeline_tab(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
+        soz_row = QtWidgets.QHBoxLayout()
+        soz_row.setSpacing(8)
+        soz_row.setContentsMargins(4, 4, 4, 4)
+        soz_row.addWidget(QtWidgets.QLabel("SOZ"))
+        self.timeline_soz_combo = QtWidgets.QComboBox()
+        self.timeline_soz_combo.setToolTip("Select which SOZ to display.")
+        soz_row.addWidget(self.timeline_soz_combo)
+        soz_row.addStretch(1)
+        layout.addLayout(soz_row)
+
         controls = QtWidgets.QHBoxLayout()
         controls.setSpacing(8)
-        controls.setContentsMargins(4, 4, 4, 4)
-        controls.addWidget(QtWidgets.QLabel("SOZ"))
-        self.timeline_soz_combo = QtWidgets.QComboBox()
+        controls.setContentsMargins(4, 0, 4, 4)
         self.timeline_overlay = QtWidgets.QCheckBox("Overlay all SOZs")
         self.timeline_step_check = QtWidgets.QCheckBox("Step plot")
         self.timeline_step_check.setChecked(True)
@@ -1530,13 +1578,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timeline_event_bin_spin.setDecimals(3)
         self.timeline_event_bin_spin.setSingleStep(0.1)
         self.timeline_event_bin_spin.setValue(0.0)
-        controls.addWidget(QtWidgets.QLabel("Metric"))
         self.timeline_metric_combo = QtWidgets.QComboBox()
         self.timeline_metric_combo.addItems(["n_solvent", "entries", "exits", "occupancy_fraction"])
+        controls.addWidget(QtWidgets.QLabel("Metric"))
         controls.addWidget(self.timeline_metric_combo)
-        controls.addWidget(QtWidgets.QLabel("Secondary"))
         self.timeline_secondary_combo = QtWidgets.QComboBox()
         self.timeline_secondary_combo.addItems(["None", "occupancy_fraction", "entries", "exits", "n_solvent"])
+        controls.addWidget(QtWidgets.QLabel("Secondary"))
         controls.addWidget(self.timeline_secondary_combo)
         self.timeline_smooth_check = QtWidgets.QCheckBox("Smooth")
         self.timeline_smooth_window = QtWidgets.QSpinBox()
@@ -1545,8 +1593,8 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.addWidget(self.timeline_smooth_check)
         controls.addWidget(QtWidgets.QLabel("Window"))
         controls.addWidget(self.timeline_smooth_window)
+        controls.addStretch(1)
 
-        self.timeline_soz_combo.setToolTip("Select which SOZ to display.")
         self.timeline_overlay.setToolTip("Overlay all SOZs in the same plot.")
         self.timeline_metric_combo.setToolTip("Primary metric to plot on the main axis.")
         self.timeline_secondary_combo.setToolTip("Optional secondary metric on the right axis.")
@@ -1621,16 +1669,11 @@ class MainWindow(QtWidgets.QMainWindow):
         toggle_row.addWidget(self.timeline_shade_threshold)
         toggle_row.addWidget(self.timeline_brush_check)
         toggle_row.addWidget(self.timeline_brush_clear)
-        # Entry/exit controls live with the event plot below.
+        # Entry/exit controls live in the Entry/Exit tab.
         toggle_row.addStretch(1)
         toggle_row.addWidget(self.timeline_save_btn)
         toggle_row.addWidget(self.timeline_copy_btn)
         toggle_row.addWidget(self.timeline_export_btn)
-
-        controls.addWidget(self.timeline_soz_combo)
-        controls.addStretch(1)
-        layout.addLayout(controls)
-        layout.addLayout(toggle_row)
         self.timeline_plot = pg.PlotWidget()
         self._style_plot(self.timeline_plot, "Occupancy Timeline")
         self.timeline_plot.setLabel("bottom", "Time", units="ns")
@@ -1653,6 +1696,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timeline_top = QtWidgets.QWidget()
         timeline_top_layout = QtWidgets.QVBoxLayout(self.timeline_top)
         timeline_top_layout.setContentsMargins(0, 0, 0, 0)
+        timeline_top_layout.addLayout(controls)
+        timeline_top_layout.addLayout(toggle_row)
         timeline_top_layout.addWidget(self.timeline_plot, 1)
         timeline_top_layout.addWidget(self.timeline_help_label)
 
@@ -1676,6 +1721,7 @@ class MainWindow(QtWidgets.QMainWindow):
         stats_row.addWidget(self.timeline_stats_status, 1)
         summary_layout.addLayout(stats_row)
         self._set_timeline_summary_style()
+        timeline_top_layout.addWidget(self.timeline_summary_frame)
 
         event_controls = QtWidgets.QHBoxLayout()
         event_controls.setSpacing(8)
@@ -1729,21 +1775,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timeline_event_container = QtWidgets.QWidget()
         event_layout = QtWidgets.QVBoxLayout(self.timeline_event_container)
         event_layout.setContentsMargins(0, 0, 0, 0)
-        event_layout.addWidget(self.timeline_summary_frame)
         event_layout.addLayout(event_controls)
         event_layout.addWidget(self.timeline_event_plot, 1)
 
-        self.timeline_split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        self.timeline_split.addWidget(self.timeline_top)
-        self.timeline_split.addWidget(self.timeline_event_container)
-        self.timeline_split.setStretchFactor(0, 2)
-        self.timeline_split.setStretchFactor(1, 1)
-        self.timeline_split.setChildrenCollapsible(False)
-        self.timeline_split.setCollapsible(0, False)
-        self.timeline_split.setCollapsible(1, False)
-        self.timeline_split.setSizes([460, 320])
-        self.timeline_split.setOpaqueResize(True)
-        layout.addWidget(self.timeline_split, 1)
+        self.timeline_tabs = QtWidgets.QTabWidget()
+        self.timeline_tabs.addTab(self.timeline_top, "Timeline")
+        self.timeline_tabs.addTab(self.timeline_event_container, "Entry/Exit")
+        layout.addWidget(self.timeline_tabs, 1)
         self._update_event_controls_state()
         return panel
 
@@ -2129,8 +2167,24 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QFormLayout(panel)
 
         self.wizard_soz_name = QtWidgets.QLineEdit("SOZ_1")
+        self.wizard_solvent_label = QtWidgets.QLineEdit("Water")
+        self.wizard_solvent_label.setPlaceholderText("e.g., Water, Methanol, DMSO")
+        self.wizard_solvent_label.setToolTip(
+            "Display label for the solvent; does not change selection logic."
+        )
         self.wizard_water_resnames = QtWidgets.QLineEdit("SOL,WAT,TIP3,HOH")
-        self.wizard_water_oxygen = QtWidgets.QLineEdit("O,OW,OH2")
+        self.wizard_water_resnames.setToolTip(
+            "Residue names used to identify solvent molecules."
+        )
+        self.wizard_probe_selection = QtWidgets.QLineEdit("name O OW OH2")
+        self.wizard_probe_selection.setToolTip(
+            "MDAnalysis selection for probe atoms within solvent residues."
+        )
+        self.wizard_probe_position = QtWidgets.QComboBox()
+        self.wizard_probe_position.addItems(["atom", "com", "cog"])
+        self.wizard_probe_position.setToolTip(
+            "How each solvent molecule is positioned for distances (atom, COM, COG)."
+        )
         self.wizard_include_ions = QtWidgets.QCheckBox("Include ions")
         self.wizard_ion_resnames = QtWidgets.QLineEdit("NA,CL,K,CA,MG")
         self.wizard_seed_a = QtWidgets.QLineEdit("protein and resid 10 and name CA")
@@ -2147,14 +2201,25 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.wizard_shell_cutoffs = QtWidgets.QLineEdit("3.5,5.0")
         self.wizard_atom_mode = QtWidgets.QComboBox()
-        self.wizard_atom_mode.addItems(["O", "all"])
+        self.wizard_atom_mode.addItems(["probe", "atom", "com", "cog", "all"])
+        self.wizard_atom_mode.setToolTip(
+            "SOZ-specific probe mode override; 'probe' uses the global probe settings."
+        )
         self.wizard_boolean = QtWidgets.QComboBox()
         self.wizard_boolean.addItems(["AND", "OR"])
         self.wizard_b_cutoff = QtWidgets.QLineEdit("3.5")
 
         layout.addRow("SOZ name", self.wizard_soz_name)
-        layout.addRow("Water resnames", self.wizard_water_resnames)
-        layout.addRow("Water oxygen names", self.wizard_water_oxygen)
+        layout.addRow("Solvent label", self.wizard_solvent_label)
+        layout.addRow("Solvent resnames", self.wizard_water_resnames)
+        layout.addRow("Probe selection", self.wizard_probe_selection)
+        layout.addRow("Probe position", self.wizard_probe_position)
+        self.wizard_solvent_note = QtWidgets.QLabel(
+            "Solvent resnames define solvent residues; probe selection/position define solvent positioning. "
+            "Update them for methanol, DMSO, mixed solvents, or ionic liquids."
+        )
+        self.wizard_solvent_note.setWordWrap(True)
+        layout.addRow("", self.wizard_solvent_note)
         layout.addRow("Include ions", self.wizard_include_ions)
         layout.addRow("Ion resnames", self.wizard_ion_resnames)
         layout.addRow("Selection A", self.wizard_seed_a)
@@ -2163,7 +2228,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wizard_seed_a_status.setWordWrap(True)
         layout.addRow("", self.wizard_seed_a_status)
         layout.addRow("Shell cutoffs (A)", self.wizard_shell_cutoffs)
-        layout.addRow("Shell atom mode", self.wizard_atom_mode)
+        layout.addRow("SOZ probe mode", self.wizard_atom_mode)
         layout.addRow("Selection B (optional)", self.wizard_seed_b)
         layout.addRow("Selection B unique match", self.wizard_seed_b_unique)
         self.wizard_seed_b_status = QtWidgets.QLabel("Selection B matches: -")
@@ -2317,7 +2382,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge_table.setColumnCount(7)
         self._configure_table_headers(
             self.bridge_table,
-            ["name", "selection_a", "selection_b", "cutoff_a", "cutoff_b", "unit", "atom_mode"],
+            ["name", "selection_a", "selection_b", "cutoff_a", "cutoff_b", "unit", "probe_mode"],
         )
         self.bridge_table.itemChanged.connect(self._on_bridge_table_changed)
         layout.addWidget(self.bridge_table)
@@ -2335,12 +2400,17 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.addWidget(remove_btn)
         controls.addStretch(1)
         layout.addLayout(controls)
+        hydration_note = QtWidgets.QLabel(
+            "Residue hydration counts solvent contacts within the cutoff using the configured probe mode."
+        )
+        hydration_note.setWordWrap(True)
+        layout.addWidget(hydration_note)
 
         self.hydration_table = QtWidgets.QTableWidget()
-        self.hydration_table.setColumnCount(5)
+        self.hydration_table.setColumnCount(6)
         self._configure_table_headers(
             self.hydration_table,
-            ["name", "residue_selection", "cutoff", "unit", "soz_name"],
+            ["name", "residue_selection", "cutoff", "unit", "probe_mode", "soz_name"],
         )
         self.hydration_table.itemChanged.connect(self._on_hydration_table_changed)
         layout.addWidget(self.hydration_table)
@@ -2425,11 +2495,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hydration_table.setRowCount(0)
         self.hydration_table.setRowCount(len(project.residue_hydration))
         for row, cfg in enumerate(project.residue_hydration):
+            probe_mode = cfg.probe_mode if cfg.probe_mode else "all"
             values = [
                 cfg.name,
                 cfg.residue_selection,
                 cfg.cutoff,
                 cfg.unit,
+                probe_mode,
                 cfg.soz_name or "",
             ]
             for col, value in enumerate(values):
@@ -2442,7 +2514,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         row = self.bridge_table.rowCount()
         self.bridge_table.insertRow(row)
-        defaults = ["bridge", "selection_a", "selection_b", "3.5", "3.5", "A", "O"]
+        defaults = ["bridge", "selection_a", "selection_b", "3.5", "3.5", "A", "probe"]
         for col, value in enumerate(defaults):
             self.bridge_table.setItem(row, col, QtWidgets.QTableWidgetItem(value))
         self._on_bridge_table_changed()
@@ -2458,7 +2530,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         row = self.hydration_table.rowCount()
         self.hydration_table.insertRow(row)
-        defaults = ["hydration", "protein", "3.5", "A", ""]
+        defaults = ["hydration", "protein", "3.5", "A", "probe", ""]
         for col, value in enumerate(defaults):
             self.hydration_table.setItem(row, col, QtWidgets.QTableWidgetItem(value))
         self._on_hydration_table_changed()
@@ -2490,7 +2562,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     cutoff_a=float(values[3] or 3.5),
                     cutoff_b=float(values[4] or 3.5),
                     unit=values[5] or "A",
-                    atom_mode=values[6] or "O",
+                    atom_mode=values[6] or "probe",
                 )
                 bridges.append(bridge)
             except Exception:
@@ -2516,7 +2588,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     residue_selection=values[1] or "protein",
                     cutoff=float(values[2] or 3.5),
                     unit=values[3] or "A",
-                    soz_name=values[4] or None,
+                    probe_mode=values[4] or None,
+                    soz_name=values[5] or None,
                 )
                 configs.append(cfg)
             except Exception:
@@ -2561,10 +2634,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selection_use_trajectory.setChecked(True)
         test_btn = QtWidgets.QPushButton("Test Selection")
         test_btn.clicked.connect(self._test_selection)
+        probe_btn = QtWidgets.QPushButton("Test Probe")
+        probe_btn.clicked.connect(self._test_probe_selection)
         options_row.addWidget(QtWidgets.QLabel("Max rows"))
         options_row.addWidget(self.selection_limit_spin)
         options_row.addWidget(self.selection_use_trajectory)
         options_row.addWidget(test_btn)
+        options_row.addWidget(probe_btn)
         options_row.addStretch(1)
         layout.addLayout(options_row)
 
@@ -2625,6 +2701,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.topology_label.setText(f"Topology: {project.inputs.topology}")
         self.trajectory_label.setText(f"Trajectory: {project.inputs.trajectory}")
+        if hasattr(self, "trajectory_clear_btn"):
+            self.trajectory_clear_btn.setEnabled(bool(project.inputs.trajectory))
         meta_text = (
             f"SOZs: {len(project.sozs)} | Selections: {len(project.selections)} "
             f"| Stride: {project.analysis.stride}"
@@ -2663,6 +2741,12 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._update_provenance_stamp()
+
+    def _reset_input_caches(self) -> None:
+        self._preflight_universe = None
+        self._preflight_key = None
+        self._tester_universe = None
+        self._tester_key = None
 
     def _refresh_output_controls(self) -> None:
         project = self.state.project
@@ -2780,14 +2864,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 cutoff_text.append(f"{val}A ({nm:.3f}nm)")
             except Exception:
                 cutoff_text.append(val)
-        atom_mode = self.wizard_atom_mode.currentText()
-        text = f"shell(selection_a, cutoffs=[{', '.join(cutoff_text)}], atom_mode={atom_mode})"
+        probe_mode = self.wizard_atom_mode.currentText()
+        text = f"shell(selection_a, cutoffs=[{', '.join(cutoff_text)}], probe_mode={probe_mode})"
         if self.wizard_seed_b.text().strip():
             text += (
                 f" {self.wizard_boolean.currentText().lower()} "
                 f"distance(selection_b, cutoff={self.wizard_b_cutoff.text() or '3.5'}A)"
             )
         self.wizard_explain.setText(text)
+
+    def _parse_probe_selection(self) -> tuple[str, list[str], str]:
+        raw = self.wizard_probe_selection.text().strip()
+        if not raw:
+            return "", [], "wizard_empty"
+        lowered = raw.lower()
+        selection_keywords = (" and ", " or ", " not ", "name ", "resname ", "segid ", "chain", "index ", "bynum ")
+        if lowered in ("all", "protein", "backbone", "sidechain", "nucleic"):
+            return raw, [], "wizard_selection"
+        if any(keyword in lowered for keyword in selection_keywords):
+            return raw, [], "wizard_selection"
+        if "," in raw or " " not in raw:
+            names = [part.strip() for part in raw.split(",") if part.strip()]
+            if names:
+                return "name " + " ".join(names), names, "wizard_atom_names"
+        return raw, [], "wizard_selection"
 
     def _toggle_overview_raw(self, visible: bool) -> None:
         self.overview_text.setVisible(visible)
@@ -2840,8 +2940,10 @@ class MainWindow(QtWidgets.QMainWindow):
             lines.append(f"dt: {self._last_dt}")
         lines.append(f"Frames: start {project.analysis.frame_start} stop {project.analysis.frame_stop or 'end'} stride {project.analysis.stride}")
         lines.append(f"Outputs: {project.outputs.output_dir} | Report: {project.outputs.report_format}")
-        lines.append(f"Water resnames: {', '.join(project.solvent.water_resnames)}")
-        lines.append(f"Oxygen names: {', '.join(project.solvent.water_oxygen_names)}")
+        lines.append(f"Solvent label: {project.solvent.solvent_label}")
+        lines.append(f"Solvent resnames: {', '.join(project.solvent.water_resnames)}")
+        lines.append(f"Probe selection: {project.solvent.probe.selection}")
+        lines.append(f"Probe position: {project.solvent.probe.position}")
         lines.append(f"Include ions: {project.solvent.include_ions} ({', '.join(project.solvent.ion_resnames)})")
         lines.append(f"Timestamp: {QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd HH:mm:ss')}")
         def describe_node(node: SOZNode, indent: int = 2) -> list[str]:
@@ -2852,13 +2954,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 unit = node.params.get("unit", "A")
                 if cutoffs is not None:
                     desc.append(f"{pad}  cutoffs: {cutoffs} {unit}")
-                desc.append(f"{pad}  atom_mode: {node.params.get('atom_mode')}")
+                desc.append(f"{pad}  probe_mode: {node.params.get('probe_mode') or node.params.get('atom_mode')}")
                 desc.append(f"{pad}  selection: {node.params.get('selection_label')}")
             if node.type == "distance":
                 cutoff = node.params.get("cutoff")
                 unit = node.params.get("unit", "A")
                 desc.append(f"{pad}  cutoff: {cutoff} {unit}")
-                desc.append(f"{pad}  atom_mode: {node.params.get('atom_mode')}")
+                desc.append(f"{pad}  probe_mode: {node.params.get('probe_mode') or node.params.get('atom_mode')}")
                 desc.append(f"{pad}  selection: {node.params.get('selection_label')}")
             for child in node.children:
                 desc.extend(describe_node(child, indent=indent + 2))
@@ -3088,16 +3190,22 @@ class MainWindow(QtWidgets.QMainWindow):
         selection_a_label = f"{soz_name}_selection_a"
         selection_b_label = f"{soz_name}_selection_b"
 
+        solvent_label = self.wizard_solvent_label.text().strip() or base.solvent.solvent_label
         water_resnames = [x.strip() for x in self.wizard_water_resnames.text().split(",") if x.strip()]
-        water_oxygen = [x.strip() for x in self.wizard_water_oxygen.text().split(",") if x.strip()]
+        probe_selection, probe_names, probe_source = self._parse_probe_selection()
+        probe_position = self.wizard_probe_position.currentText().strip() or "atom"
         ion_resnames = [x.strip() for x in self.wizard_ion_resnames.text().split(",") if x.strip()]
+        water_oxygen = probe_names or base.solvent.water_oxygen_names
         solvent_cfg = SolventConfig(
+            solvent_label=solvent_label,
             water_resnames=water_resnames or base.solvent.water_resnames,
             water_oxygen_names=water_oxygen or base.solvent.water_oxygen_names,
             water_hydrogen_names=base.solvent.water_hydrogen_names,
             ion_resnames=ion_resnames or base.solvent.ion_resnames,
             include_ions=self.wizard_include_ions.isChecked(),
+            probe=ProbeConfig(selection=probe_selection, position=probe_position),
         )
+        solvent_cfg.probe_source = probe_source
 
         selection_a_sel = self.wizard_seed_a.text().strip()
         selections = {
@@ -3118,7 +3226,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "selection_label": selection_a_label,
                 "cutoffs": shell_cutoffs,
                 "unit": "A",
-                "atom_mode": atom_mode,
+                "probe_mode": atom_mode,
             },
         )
 
@@ -3136,7 +3244,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "selection_label": selection_b_label,
                     "cutoff": float(self.wizard_b_cutoff.text() or 3.5),
                     "unit": "A",
-                    "atom_mode": atom_mode,
+                    "probe_mode": atom_mode,
                 },
             )
             combine = self.wizard_boolean.currentText().lower()
@@ -3158,8 +3266,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _wizard_state(self) -> dict:
         return {
             "soz_name": self.wizard_soz_name.text().strip() or "SOZ",
+            "solvent_label": self.wizard_solvent_label.text().strip(),
             "water_resnames": self.wizard_water_resnames.text().strip(),
-            "water_oxygen": self.wizard_water_oxygen.text().strip(),
+            "probe_selection": self.wizard_probe_selection.text().strip(),
+            "probe_position": self.wizard_probe_position.currentText(),
             "include_ions": self.wizard_include_ions.isChecked(),
             "ion_resnames": self.wizard_ion_resnames.text().strip(),
             "selection_a": self.wizard_seed_a.text().strip(),
@@ -3187,16 +3297,22 @@ class MainWindow(QtWidgets.QMainWindow):
         selection_a_label = f"{soz_name}_selection_a"
         selection_b_label = f"{soz_name}_selection_b"
 
+        solvent_label = self.wizard_solvent_label.text().strip() or project.solvent.solvent_label
         water_resnames = [x.strip() for x in self.wizard_water_resnames.text().split(",") if x.strip()]
-        water_oxygen = [x.strip() for x in self.wizard_water_oxygen.text().split(",") if x.strip()]
+        probe_selection, probe_names, probe_source = self._parse_probe_selection()
+        probe_position = self.wizard_probe_position.currentText().strip() or "atom"
         ion_resnames = [x.strip() for x in self.wizard_ion_resnames.text().split(",") if x.strip()]
+        water_oxygen = probe_names or project.solvent.water_oxygen_names
         project.solvent = SolventConfig(
+            solvent_label=solvent_label,
             water_resnames=water_resnames or project.solvent.water_resnames,
             water_oxygen_names=water_oxygen or project.solvent.water_oxygen_names,
             water_hydrogen_names=project.solvent.water_hydrogen_names,
             ion_resnames=ion_resnames or project.solvent.ion_resnames,
             include_ions=self.wizard_include_ions.isChecked(),
+            probe=ProbeConfig(selection=probe_selection, position=probe_position),
         )
+        project.solvent.probe_source = probe_source
 
         selection_a_sel = self.wizard_seed_a.text().strip()
         if not selection_a_sel:
@@ -3219,7 +3335,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "selection_label": selection_a_label,
                 "cutoffs": shell_cutoffs,
                 "unit": "A",
-                "atom_mode": atom_mode,
+                "probe_mode": atom_mode,
             },
         )
 
@@ -3237,7 +3353,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "selection_label": selection_b_label,
                     "cutoff": float(self.wizard_b_cutoff.text() or 3.5),
                     "unit": "A",
-                    "atom_mode": atom_mode,
+                    "probe_mode": atom_mode,
                 },
             )
             combine = self.wizard_boolean.currentText().lower()
@@ -3551,11 +3667,34 @@ class MainWindow(QtWidgets.QMainWindow):
             lines.append("Warnings:")
             lines.extend([f"  - {warn}" for warn in report.warnings])
         solvent = report.solvent_summary or {}
-        water_matches = solvent.get("water_matches", [])
+        solvent_matches = solvent.get("solvent_matches", [])
         ion_matches = solvent.get("ion_matches", [])
-        lines.append(f"Water matches: {', '.join(map(str, water_matches)) or 'none'}")
+        lines.append(f"Solvent matches: {', '.join(map(str, solvent_matches)) or 'none'}")
         if solvent.get("include_ions"):
             lines.append(f"Ion matches: {', '.join(map(str, ion_matches)) or 'none'}")
+        probe = solvent.get("probe_summary", {})
+        if probe:
+            lines.append(f"Probe selection: {probe.get('selection', '')}")
+            lines.append(f"Probe position: {probe.get('position', '')}")
+            lines.append(
+                "Probe atoms: "
+                f"{probe.get('probe_atom_count', 0)} | "
+                f"residues w/probe: {probe.get('residues_with_probe', 0)}"
+            )
+            missing_count = probe.get("probe_residues_missing_count", 0)
+            missing_sample = probe.get("probe_residues_missing_sample", [])
+            if missing_count:
+                lines.append(
+                    "Probe missing residues: "
+                    f"{missing_count} (sample: {', '.join(map(str, missing_sample))})"
+                )
+            multi_count = probe.get("probe_residues_multi_count", 0)
+            multi_sample = probe.get("probe_residues_multi_sample", [])
+            if multi_count:
+                lines.append(
+                    "Probe multi atoms/residue: "
+                    f"{multi_count} (sample: {', '.join(map(str, multi_sample))})"
+                )
         pbc = report.pbc_summary or {}
         lines.append(f"PBC box present: {pbc.get('has_box')}")
         gmx = report.gmx_summary or {}
@@ -3609,6 +3748,43 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         QtWidgets.QMessageBox.information(self, "PBC Helper", "\n".join(cmd_lines))
 
+    def _browse_topology(self) -> None:
+        if not self.state.project:
+            self.status_bar.showMessage("Load a project first.", 4000)
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select Topology", "", "Topology (*)"
+        )
+        if not path:
+            return
+        self.state.project.inputs.topology = path
+        self._reset_input_caches()
+        self._refresh_project_ui()
+        self.status_bar.showMessage("Topology updated. Rerun analysis.", 5000)
+
+    def _browse_trajectory(self) -> None:
+        if not self.state.project:
+            self.status_bar.showMessage("Load a project first.", 4000)
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select Trajectory", "", "Trajectory (*)"
+        )
+        if not path:
+            return
+        self.state.project.inputs.trajectory = path
+        self._reset_input_caches()
+        self._refresh_project_ui()
+        self.status_bar.showMessage("Trajectory updated. Rerun analysis.", 5000)
+
+    def _clear_trajectory(self) -> None:
+        if not self.state.project:
+            self.status_bar.showMessage("Load a project first.", 4000)
+            return
+        self.state.project.inputs.trajectory = None
+        self._reset_input_caches()
+        self._refresh_project_ui()
+        self.status_bar.showMessage("Trajectory cleared. Rerun analysis.", 5000)
+
     def _test_selection(self) -> None:
         selection = self.selection_input.text().strip()
         if not selection:
@@ -3629,6 +3805,95 @@ class MainWindow(QtWidgets.QMainWindow):
         if result.get("error") and self.run_logger:
             self.run_logger.error("Selection test failed: %s", result.get("error"))
         rows = result.get("rows", [])
+        self.selection_table.setRowCount(0)
+        self.selection_table.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for col, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(str(value))
+                self.selection_table.setItem(row, col, item)
+
+    def _test_probe_selection(self) -> None:
+        if not self.state.project:
+            self.selection_results.setText("Load a project first.")
+            return
+        if not self.run_logger:
+            self.run_logger, self.log_path = setup_run_logger(self.state.project.outputs.output_dir)
+        if self.run_logger:
+            self.run_logger.info("Probe selection test requested")
+
+        use_traj = self.selection_use_trajectory.isChecked()
+        limit = int(self.selection_limit_spin.value())
+        universe = self._ensure_tester_universe(use_traj)
+        if universe is None:
+            self.selection_results.setText("Unable to load inputs for probe test.")
+            return
+
+        solvent_label = self.wizard_solvent_label.text().strip() or self.state.project.solvent.solvent_label
+        water_resnames = [x.strip() for x in self.wizard_water_resnames.text().split(",") if x.strip()]
+        ion_resnames = [x.strip() for x in self.wizard_ion_resnames.text().split(",") if x.strip()]
+        probe_selection, probe_names, probe_source = self._parse_probe_selection()
+        probe_position = self.wizard_probe_position.currentText().strip() or "atom"
+        water_oxygen = probe_names or self.state.project.solvent.water_oxygen_names
+        solvent_cfg = SolventConfig(
+            solvent_label=solvent_label,
+            water_resnames=water_resnames or self.state.project.solvent.water_resnames,
+            water_oxygen_names=water_oxygen or self.state.project.solvent.water_oxygen_names,
+            water_hydrogen_names=self.state.project.solvent.water_hydrogen_names,
+            ion_resnames=ion_resnames or self.state.project.solvent.ion_resnames,
+            include_ions=self.wizard_include_ions.isChecked(),
+            probe=ProbeConfig(selection=probe_selection, position=probe_position),
+        )
+        solvent_cfg.probe_source = probe_source
+
+        try:
+            solvent = build_solvent(universe, solvent_cfg)
+        except Exception as exc:
+            self.selection_results.setText(f"Probe selection failed: {exc}")
+            self.selection_table.setRowCount(0)
+            if self.run_logger:
+                self.run_logger.error("Probe selection failed: %s", exc)
+            return
+
+        probe_counts = {
+            resindex: len(indices)
+            for resindex, indices in solvent.probe.resindex_to_atom_indices.items()
+        }
+        multi = [idx for idx, count in probe_counts.items() if count > 1]
+        missing = [idx for idx, count in probe_counts.items() if count == 0]
+
+        lines = [
+            f"Probe selection: {solvent.probe.selection}",
+            f"Probe position: {solvent.probe.position}",
+            f"Solvent residues: {len(solvent.residues)}",
+            f"Probe atoms: {len(solvent.probe.atom_indices)}",
+            f"Residues with probe: {sum(1 for count in probe_counts.values() if count > 0)}",
+        ]
+        if multi:
+            lines.append(f"Multi-probe residues: {len(multi)} (sample: {', '.join(map(str, multi[:10]))})")
+        if missing:
+            lines.append(f"Missing probe residues: {len(missing)} (sample: {', '.join(map(str, missing[:10]))})")
+        if multi and solvent.probe.position == "atom":
+            lines.append("Warning: probe matches multiple atoms per residue.")
+        self.selection_results.setText("\n".join(lines))
+
+        rows = []
+        for atom in solvent.probe.atoms[:limit]:
+            res = atom.residue
+            residue_number = getattr(res, "resnum", None)
+            if residue_number in (None, ""):
+                residue_number = int(res.resid)
+            rows.append(
+                [
+                    int(atom.index),
+                    str(res.resname),
+                    int(res.resid),
+                    residue_number,
+                    str(res.segid),
+                    getattr(res, "chainID", ""),
+                    getattr(res, "moltype", ""),
+                    str(atom.name),
+                ]
+            )
         self.selection_table.setRowCount(0)
         self.selection_table.setRowCount(len(rows))
         for row, values in enumerate(rows):
@@ -5038,6 +5303,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ext_map = {
             "PNG": ".png",
             "SVG": ".svg",
+            "EMF": ".emf",
             "PDF": ".pdf",
             "CSV": ".csv",
         }
@@ -5082,7 +5348,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self,
             title,
             default_path,
-            "PNG (*.png);;SVG (*.svg);;PDF (*.pdf);;CSV (*.csv)",
+            "PNG (*.png);;SVG (*.svg);;EMF (*.emf);;PDF (*.pdf);;CSV (*.csv)",
         )
         if not path:
             return
@@ -5095,18 +5361,24 @@ class MainWindow(QtWidgets.QMainWindow):
             csv_exporter(path)
             return
         try:
+            if suffix == ".emf":
+                if self._export_plot_emf(plot_widget, path):
+                    self._notify_powerpoint_export(
+                        "EMF",
+                        path,
+                        "In PowerPoint: Insert > Pictures, then Group > Ungroup (accept the conversion prompt).",
+                    )
+                return
             if suffix == ".pdf":
-                pdf_writer = QtGui.QPdfWriter(path)
-                painter = QtGui.QPainter(pdf_writer)
-                plot_widget.render(painter)
-                painter.end()
+                self._export_plot_pdf(plot_widget, path)
                 return
             if suffix == ".svg":
-                if isinstance(plot_widget, pg.PlotWidget):
-                    exporter = pg.exporters.SVGExporter(plot_widget.plotItem)
-                    exporter.export(path)
-                else:
-                    self._render_widget_svg(plot_widget, path)
+                if self._export_plot_svg(plot_widget, path, sanitize=True):
+                    self._notify_powerpoint_export(
+                        "SVG",
+                        path,
+                        "If Ungroup fails, use Insert > Pictures and try Ungroup after paste.",
+                    )
                 return
             if isinstance(plot_widget, pg.PlotWidget):
                 exporter = pg.exporters.ImageExporter(plot_widget.plotItem)
@@ -5119,20 +5391,360 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.run_logger.exception("Plot export failed")
             self.status_bar.showMessage(f"Plot export failed: {exc}", 8000)
 
-    def _render_widget_svg(self, widget: QtWidgets.QWidget, path: str) -> None:
+    def _export_plot_svg(
+        self, plot_widget: QtWidgets.QWidget, path: str, sanitize: bool = True
+    ) -> bool:
+        if isinstance(plot_widget, pg.PlotWidget):
+            ok = self._export_plot_svg_pg(plot_widget, path)
+        else:
+            ok = self._render_widget_svg(plot_widget, path)
+        if ok:
+            self._normalize_svg_text(path)
+            if sanitize:
+                self._sanitize_svg_for_powerpoint(path)
+        return ok
+
+    def _export_plot_svg_pg(self, plot_widget: pg.PlotWidget, path: str) -> bool:
+        plot_item = getattr(plot_widget, "plotItem", None)
+        if plot_item is None:
+            return self._render_widget_svg(plot_widget, path)
+        clip_state = None
+        if hasattr(plot_item, "setClipToView"):
+            clip_attr = getattr(plot_item, "clipToView", None)
+            if callable(clip_attr):
+                clip_state = clip_attr()
+            elif isinstance(clip_attr, bool):
+                clip_state = clip_attr
+            plot_item.setClipToView(False)
+        try:
+            exporter = pg.exporters.SVGExporter(plot_item)
+            rect = plot_item.sceneBoundingRect()
+            export_size = QtCore.QSize(
+                max(1, int(round(rect.width()))),
+                max(1, int(round(rect.height()))),
+            )
+            try:
+                params = exporter.parameters()
+                if hasattr(params, "keys"):
+                    if "width" in params:
+                        params["width"] = export_size.width()
+                    if "height" in params:
+                        params["height"] = export_size.height()
+            except Exception:
+                pass
+            exporter.export(path)
+            return True
+        except Exception:
+            return self._render_widget_svg(plot_widget, path)
+        finally:
+            if clip_state is not None and hasattr(plot_item, "setClipToView"):
+                plot_item.setClipToView(clip_state)
+
+    def _export_target_size(self, widget: QtWidgets.QWidget) -> QtCore.QSize:
+        size = widget.size()
+        if size.width() <= 0 or size.height() <= 0:
+            size = widget.sizeHint()
+        if size.width() <= 0 or size.height() <= 0:
+            size = QtCore.QSize(960, 640)
+        return size
+
+    def _render_widget_svg(self, widget: QtWidgets.QWidget, path: str) -> bool:
         try:
             from PyQt6 import QtSvg
         except Exception:
             self.status_bar.showMessage("SVG export requires QtSvg.", 5000)
+            return False
+        try:
+            generator = QtSvg.QSvgGenerator()
+            generator.setFileName(path)
+            size = self._export_target_size(widget)
+            generator.setSize(size)
+            generator.setViewBox(QtCore.QRect(0, 0, size.width(), size.height()))
+            generator.setResolution(96)
+            painter = QtGui.QPainter(generator)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
+            widget.render(painter)
+            painter.end()
+            return True
+        except Exception as exc:
+            if self.run_logger:
+                self.run_logger.exception("SVG export failed")
+            self.status_bar.showMessage(f"SVG export failed: {exc}", 8000)
+            return False
+
+    def _export_plot_pdf(self, plot_widget: QtWidgets.QWidget, path: str) -> bool:
+        if self._export_plot_via_inkscape(plot_widget, path, "pdf"):
+            return True
+        if self._render_widget_pdf(plot_widget, path):
+            self.status_bar.showMessage(
+                "PDF exported with Qt fallback; install Inkscape for best fidelity.",
+                8000,
+            )
+            return True
+        self.status_bar.showMessage("PDF export failed.", 8000)
+        return False
+
+    def _export_plot_emf(self, plot_widget: QtWidgets.QWidget, path: str) -> bool:
+        if self._export_plot_via_inkscape(plot_widget, path, "emf"):
+            return True
+        if sys.platform == "win32" and self._render_widget_emf_native(plot_widget, path):
+            self.status_bar.showMessage(
+                "EMF exported with native printer; install Inkscape for best fidelity.",
+                8000,
+            )
+            return True
+        self.status_bar.showMessage("EMF export failed. Install Inkscape.", 8000)
+        return False
+
+    def _export_plot_via_inkscape(
+        self, plot_widget: QtWidgets.QWidget, path: str, fmt: str
+    ) -> bool:
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                svg_path = str(Path(tmp_dir) / "plot.svg")
+                if not self._export_plot_svg(plot_widget, svg_path, sanitize=False):
+                    return False
+                if fmt == "emf":
+                    return self._convert_svg_to_emf(svg_path, path)
+                if fmt == "pdf":
+                    return self._convert_svg_to_pdf(svg_path, path)
+        except Exception:
+            return False
+        return False
+
+    def _render_widget_pdf(self, widget: QtWidgets.QWidget, path: str) -> bool:
+        try:
+            export_size = self._export_target_size(widget)
+            dpi = 96.0
+            width_in = export_size.width() / dpi
+            height_in = export_size.height() / dpi
+            pdf_writer = QtGui.QPdfWriter(path)
+            pdf_writer.setResolution(int(dpi))
+            try:
+                pdf_writer.setPageMargins(QtCore.QMarginsF(0, 0, 0, 0))
+            except Exception:
+                pass
+            try:
+                page_size = QtGui.QPageSize(
+                    QtCore.QSizeF(width_in * 72.0, height_in * 72.0),
+                    QtGui.QPageSize.Unit.Point,
+                )
+                pdf_writer.setPageSize(page_size)
+            except Exception:
+                pass
+            painter = QtGui.QPainter(pdf_writer)
+            if not painter.isActive():
+                return False
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
+            target = QtCore.QRectF(0, 0, pdf_writer.width(), pdf_writer.height())
+            source = QtCore.QRectF(0, 0, export_size.width(), export_size.height())
+            widget.render(painter, target, source)
+            painter.end()
+            pdf_path = Path(path)
+            return pdf_path.exists() and pdf_path.stat().st_size > 0
+        except Exception as exc:
+            if self.run_logger:
+                self.run_logger.exception("PDF export failed")
+            self.status_bar.showMessage(f"PDF export failed: {exc}", 8000)
+            return False
+
+    def _sanitize_svg_for_powerpoint(self, path: str) -> None:
+        self._normalize_svg_text(path)
+        if self._convert_svg_to_plain_svg(path):
+            self._normalize_svg_text(path)
+
+    def _normalize_svg_text(self, path: str) -> None:
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except Exception:
             return
-        generator = QtSvg.QSvgGenerator()
-        generator.setFileName(path)
-        size = widget.size()
-        generator.setSize(size)
-        generator.setViewBox(QtCore.QRect(0, 0, size.width(), size.height()))
-        painter = QtGui.QPainter(generator)
-        widget.render(painter)
-        painter.end()
+        updated = text
+        updated = re.sub(r'<!DOCTYPE[^>]*>', '', updated)
+        updated = updated.replace('baseProfile="tiny"', "")
+        updated = updated.replace('version="1.2"', 'version="1.1"')
+        if "xmlns=\"http://www.w3.org/2000/svg\"" not in updated:
+            updated = updated.replace("<svg ", "<svg xmlns=\"http://www.w3.org/2000/svg\" ")
+        if "xmlns:xlink" not in updated:
+            updated = updated.replace(
+                "<svg ",
+                "<svg xmlns:xlink=\"http://www.w3.org/1999/xlink\" ",
+            )
+        updated = re.sub(r'width="(\\d+)"', r'width="\\1px"', updated)
+        updated = re.sub(r'height="(\\d+)"', r'height="\\1px"', updated)
+        if "viewBox" not in updated:
+            width_match = re.search(r'width="([\\d\\.]+)px"', updated)
+            height_match = re.search(r'height="([\\d\\.]+)px"', updated)
+            if width_match and height_match:
+                view_box = f'viewBox="0 0 {width_match.group(1)} {height_match.group(1)}"'
+                updated = updated.replace("<svg ", f"<svg {view_box} ", 1)
+        if updated != text:
+            try:
+                Path(path).write_text(updated, encoding="utf-8")
+            except Exception:
+                pass
+
+    def _render_widget_emf_native(self, widget: QtWidgets.QWidget, path: str) -> bool:
+        try:
+            printer = QtPrintSupport.QPrinter(QtPrintSupport.QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QtPrintSupport.QPrinter.OutputFormat.NativeFormat)
+            printer.setOutputFileName(path)
+            if not printer.isValid():
+                return False
+            try:
+                printer.setFullPage(True)
+            except Exception:
+                pass
+            size = widget.size()
+            dpi_x = float(widget.logicalDpiX()) if hasattr(widget, "logicalDpiX") else 96.0
+            dpi_y = float(widget.logicalDpiY()) if hasattr(widget, "logicalDpiY") else 96.0
+            if dpi_x <= 0:
+                dpi_x = 96.0
+            if dpi_y <= 0:
+                dpi_y = 96.0
+            width_in = size.width() / dpi_x
+            height_in = size.height() / dpi_y
+            try:
+                page_size = QtGui.QPageSize(
+                    QtCore.QSizeF(width_in * 72.0, height_in * 72.0),
+                    QtGui.QPageSize.Unit.Point,
+                )
+                printer.setPageSize(page_size)
+            except Exception:
+                pass
+            painter = QtGui.QPainter(printer)
+            if not painter.isActive():
+                return False
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
+            widget.render(painter)
+            painter.end()
+            emf_path = Path(path)
+            return emf_path.exists() and emf_path.stat().st_size > 0
+        except Exception as exc:
+            if self.run_logger:
+                self.run_logger.exception("EMF export failed")
+            self.status_bar.showMessage(f"EMF export failed: {exc}", 8000)
+            return False
+
+    def _convert_svg_to_emf(self, svg_path: str, emf_path: str) -> bool:
+        inkscape = self._find_inkscape()
+        if not inkscape:
+            return False
+        commands = [
+            [inkscape, svg_path, "--export-type=emf", "--export-area-drawing", "--export-filename", emf_path],
+            [inkscape, svg_path, "--export-type=emf", "--export-area-page", "--export-filename", emf_path],
+            [inkscape, svg_path, "--export-type=emf", f"--export-filename={emf_path}"],
+            [inkscape, svg_path, "--export-emf", emf_path],
+            [inkscape, svg_path, f"--export-emf={emf_path}"],
+        ]
+        for cmd in commands:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except Exception:
+                continue
+            if result.returncode == 0:
+                out_path = Path(emf_path)
+                if out_path.exists() and out_path.stat().st_size > 0:
+                    return True
+        return False
+
+    def _convert_svg_to_pdf(self, svg_path: str, pdf_path: str) -> bool:
+        inkscape = self._find_inkscape()
+        if not inkscape:
+            return False
+        commands = [
+            [inkscape, svg_path, "--export-type=pdf", "--export-area-drawing", "--export-filename", pdf_path],
+            [inkscape, svg_path, "--export-type=pdf", "--export-area-page", "--export-filename", pdf_path],
+            [inkscape, svg_path, "--export-type=pdf", f"--export-filename={pdf_path}"],
+            [inkscape, svg_path, "--export-pdf", pdf_path],
+            [inkscape, svg_path, f"--export-pdf={pdf_path}"],
+        ]
+        for cmd in commands:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except Exception:
+                continue
+            if result.returncode == 0:
+                out_path = Path(pdf_path)
+                if out_path.exists() and out_path.stat().st_size > 0:
+                    return True
+        return False
+
+    def _convert_svg_to_plain_svg(self, svg_path: str) -> bool:
+        inkscape = self._find_inkscape()
+        if not inkscape:
+            return False
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                out_path = str(Path(tmp_dir) / "plain.svg")
+                commands = [
+                    [inkscape, svg_path, "--export-plain-svg", "--export-area-drawing", "--export-filename", out_path],
+                    [inkscape, svg_path, "--export-plain-svg", "--export-area-page", "--export-filename", out_path],
+                    [inkscape, svg_path, "--export-plain-svg", "--export-filename", out_path],
+                    [inkscape, svg_path, "--export-plain-svg", f"--export-filename={out_path}"],
+                    [inkscape, svg_path, "--export-plain-svg", out_path],
+                    [inkscape, svg_path, "--export-type=svg", "--export-plain-svg", "--export-filename", out_path],
+                    [inkscape, svg_path, "--export-type=svg", f"--export-filename={out_path}"],
+                ]
+                for cmd in commands:
+                    try:
+                        result = subprocess.run(
+                            cmd,
+                            check=False,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                    except Exception:
+                        continue
+                    if result.returncode == 0 and Path(out_path).exists():
+                        shutil.copyfile(out_path, svg_path)
+                        return True
+        except Exception:
+            return False
+        return False
+
+    def _find_inkscape(self) -> str | None:
+        candidate = shutil.which("inkscape")
+        if candidate:
+            return candidate
+        if sys.platform == "darwin":
+            app_path = "/Applications/Inkscape.app/Contents/MacOS/inkscape"
+            if Path(app_path).exists():
+                return app_path
+            return None
+        if sys.platform != "win32":
+            return None
+        roots = [
+            os.environ.get("ProgramFiles"),
+            os.environ.get("ProgramFiles(x86)"),
+        ]
+        candidates = []
+        for root in roots:
+            if not root:
+                continue
+            candidates.append(Path(root) / "Inkscape" / "inkscape.exe")
+            candidates.append(Path(root) / "Inkscape" / "inkscape.com")
+            candidates.append(Path(root) / "Inkscape" / "bin" / "inkscape.exe")
+            candidates.append(Path(root) / "Inkscape" / "bin" / "inkscape.com")
+        for path in candidates:
+            if path.exists():
+                return str(path)
+        return None
+
+    def _notify_powerpoint_export(self, fmt: str, path: str, tip: str) -> None:
+        self.status_bar.showMessage(f"{fmt} saved: {path}. PowerPoint tip: {tip}", 8000)
 
     def _write_timeline_csv(self, path: str) -> None:
         if not self.current_result or not self.current_result.soz_results:
@@ -6165,7 +6777,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _hist_metric_label(self, metric: str) -> str:
         if metric == "n_solvent":
-            return "Waters within cutoff per frame"
+            return "Solvent molecules within cutoff per frame"
         if metric == "entries":
             return "Entry events per frame"
         if metric == "exits":

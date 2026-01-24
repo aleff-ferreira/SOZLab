@@ -8,6 +8,10 @@
     "water_resnames": ["SOL"],
     "water_oxygen_names": ["O", "OW"],
     "water_hydrogen_names": ["H1", "H2"],
+    "probe": {
+      "selection": "name O OW",
+      "position": "atom"
+    },
     "ion_resnames": ["NA", "CL"],
     "include_ions": false
   },
@@ -33,7 +37,7 @@
           "selection_label": "selection_a",
           "cutoffs": [3.5, 5.0],
           "unit": "A",
-          "atom_mode": "O"
+          "atom_mode": "probe"
         },
         "children": []
       }
@@ -51,7 +55,7 @@
               "selection_label": "selection_a",
               "cutoffs": [3.5, 5.0],
               "unit": "A",
-              "atom_mode": "O"
+              "atom_mode": "probe"
             },
             "children": []
           },
@@ -61,7 +65,7 @@
               "selection_label": "selection_b",
               "cutoff": 4.0,
               "unit": "A",
-              "atom_mode": "O"
+              "atom_mode": "probe"
             },
             "children": []
           }
@@ -92,7 +96,7 @@
       "cutoff_a": 3.5,
       "cutoff_b": 4.0,
       "unit": "A",
-      "atom_mode": "O"
+      "atom_mode": "probe"
     }
   ],
   "residue_hydration": [
@@ -101,6 +105,7 @@
       "residue_selection": "protein",
       "cutoff": 3.5,
       "unit": "A",
+      "probe_mode": "probe",
       "soz_name": "shell_only"
     }
   ]

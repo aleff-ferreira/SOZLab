@@ -5,7 +5,7 @@ import numpy as np
 import MDAnalysis as mda
 
 from engine.analysis import _min_distance_to_soz
-from engine.models import SolventConfig
+from engine.models import ProbeConfig, SolventConfig
 from engine.solvent import build_solvent
 
 
@@ -37,14 +37,20 @@ def _make_universe():
 
 def test_min_distance_oxygen_only():
     u = _make_universe()
-    solvent = build_solvent(u, SolventConfig(water_resnames=["WAT"], water_oxygen_names=["O"]))
+    solvent = build_solvent(
+        u,
+        SolventConfig(
+            water_resnames=["WAT"],
+            probe=ProbeConfig(selection="name O", position="atom"),
+        ),
+    )
     seed = u.select_atoms("resid 1 and name CA")
     frame_set = {solvent.residues[0].resindex}
 
     # All-atoms distance should see H at 1.0 A.
-    dist_all = _min_distance_to_soz(seed, solvent, frame_set, box=None, use_oxygen=False)
+    dist_all = _min_distance_to_soz(seed, solvent, frame_set, box=None, mode="all")
     # Oxygen-only distance should see O at 10.0 A.
-    dist_oxy = _min_distance_to_soz(seed, solvent, frame_set, box=None, use_oxygen=True)
+    dist_oxy = _min_distance_to_soz(seed, solvent, frame_set, box=None, mode="atom")
 
     assert np.isclose(dist_all, 1.0)
     assert np.isclose(dist_oxy, 10.0)

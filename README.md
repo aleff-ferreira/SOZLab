@@ -54,7 +54,7 @@ Then load `examples/sample_project.json` and click **Run**.
 
 ## Troubleshooting (top 5)
 1) Selection resolves to 0 atoms: check resnames, segid/chainID, and `resid` vs `resnum`.
-2) Water resnames mismatch: update `solvent.water_resnames` to match your topology.
+2) Solvent resnames mismatch: update `solvent.water_resnames` to match your topology.
 3) PBC warning: `No valid box vectors found` means distances may be unreliable.
 4) Matplotlib cache warning: set `MPLCONFIGDIR` to a writable directory.
 5) Heatmap or raster empty: ensure `analysis.store_ids=true` (or avoid `--no-ids`).
@@ -68,5 +68,4 @@ Then load `examples/sample_project.json` and click **Run**.
 See `CITATION.cff`.
 
 ## License
-MIT.
-
+MIT (default; confirm if a different license is desired).

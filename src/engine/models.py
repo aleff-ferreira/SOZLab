@@ -56,31 +56,83 @@ SeedSpec = SelectionSpec
 
 
 @dataclass
+class ProbeConfig:
+    """Probe definition for solvent positioning."""
+    selection: str = "name O OW OH2"
+    position: str = "atom"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "selection": self.selection,
+            "position": self.position,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ProbeConfig":
+        return cls(
+            selection=str(data.get("selection", "")),
+            position=str(data.get("position", "atom")),
+        )
+
+
+@dataclass
 class SolventConfig:
+    solvent_label: str = "Water"
     water_resnames: List[str] = field(default_factory=lambda: ["SOL", "WAT", "TIP3", "HOH"])
     water_oxygen_names: List[str] = field(default_factory=lambda: ["O", "OW", "OH2"])
     water_hydrogen_names: List[str] = field(default_factory=lambda: ["H1", "H2", "HW1", "HW2"])
     ion_resnames: List[str] = field(default_factory=lambda: ["NA", "CL", "K", "CA", "MG"])
     include_ions: bool = False
+    probe: ProbeConfig = field(default_factory=ProbeConfig)
+    probe_source: Optional[str] = field(default=None, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "solvent_label": self.solvent_label,
             "water_resnames": self.water_resnames,
             "water_oxygen_names": self.water_oxygen_names,
             "water_hydrogen_names": self.water_hydrogen_names,
             "ion_resnames": self.ion_resnames,
             "include_ions": self.include_ions,
+            "probe": self.probe.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SolventConfig":
-        return cls(
-            water_resnames=list(data.get("water_resnames", ["SOL", "WAT", "TIP3", "HOH"])),
-            water_oxygen_names=list(data.get("water_oxygen_names", ["O", "OW", "OH2"])),
+        resnames = data.get("solvent_resnames", data.get("water_resnames", ["SOL", "WAT", "TIP3", "HOH"]))
+        oxygen_names = list(data.get("water_oxygen_names", ["O", "OW", "OH2"]))
+
+        probe = None
+        probe_source = None
+        probe_data = data.get("probe")
+        if isinstance(probe_data, dict):
+            probe = ProbeConfig.from_dict(probe_data)
+            probe_source = "probe"
+        else:
+            selection = str(data.get("probe_selection", "") or "")
+            position = str(data.get("probe_position", "") or "")
+            if selection or position:
+                probe = ProbeConfig(selection=selection, position=position or "atom")
+                probe_source = "probe_fields"
+            elif oxygen_names:
+                selection = "name " + " ".join(oxygen_names)
+                probe = ProbeConfig(selection=selection, position="atom")
+                probe_source = "legacy_water_oxygen_names"
+            else:
+                probe = ProbeConfig()
+                probe_source = "default_probe"
+
+        cfg = cls(
+            solvent_label=str(data.get("solvent_label", "Water")),
+            water_resnames=list(resnames),
+            water_oxygen_names=oxygen_names,
             water_hydrogen_names=list(data.get("water_hydrogen_names", ["H1", "H2", "HW1", "HW2"])),
             ion_resnames=list(data.get("ion_resnames", ["NA", "CL", "K", "CA", "MG"])),
             include_ions=bool(data.get("include_ions", False)),
+            probe=probe,
         )
+        cfg.probe_source = probe_source
+        return cfg
 
 
 @dataclass
@@ -170,7 +222,7 @@ class BridgeConfig:
     cutoff_a: float
     cutoff_b: float
     unit: str = "A"
-    atom_mode: str = "O"
+    atom_mode: str = "probe"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -185,6 +237,7 @@ class BridgeConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BridgeConfig":
+        mode = data.get("probe_mode", data.get("atom_mode", "probe"))
         return cls(
             name=data.get("name", "bridge"),
             selection_a=data.get("selection_a", data.get("seed_a", "selection_a")),
@@ -192,7 +245,7 @@ class BridgeConfig:
             cutoff_a=float(data.get("cutoff_a", 3.5)),
             cutoff_b=float(data.get("cutoff_b", 3.5)),
             unit=data.get("unit", "A"),
-            atom_mode=data.get("atom_mode", "O"),
+            atom_mode=mode,
         )
 
     @property
@@ -219,6 +272,7 @@ class ResidueHydrationConfig:
     cutoff: float
     unit: str = "A"
     soz_name: Optional[str] = None
+    probe_mode: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -227,6 +281,7 @@ class ResidueHydrationConfig:
             "cutoff": self.cutoff,
             "unit": self.unit,
             "soz_name": self.soz_name,
+            "probe_mode": self.probe_mode,
         }
 
     @classmethod
@@ -237,6 +292,7 @@ class ResidueHydrationConfig:
             cutoff=float(data.get("cutoff", 3.5)),
             unit=data.get("unit", "A"),
             soz_name=data.get("soz_name"),
+            probe_mode=data.get("probe_mode"),
         )
 
 

@@ -8,21 +8,21 @@
       {
         "type": "shell",
         "params": {
-          "selection_label": "selection_a",
-          "cutoffs": [3.5, 5.0],
-          "unit": "A",
-          "atom_mode": "O"
-        },
+      "selection_label": "selection_a",
+      "cutoffs": [3.5, 5.0],
+      "unit": "A",
+      "atom_mode": "probe"
+    },
         "children": []
       },
       {
         "type": "distance",
         "params": {
-          "selection_label": "selection_b",
-          "cutoff": 4.0,
-          "unit": "A",
-          "atom_mode": "O"
-        },
+      "selection_label": "selection_b",
+      "cutoff": 4.0,
+      "unit": "A",
+      "atom_mode": "probe"
+    },
         "children": []
       }
     ]

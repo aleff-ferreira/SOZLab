@@ -20,7 +20,13 @@ from engine.models import (
     SOZNode,
 )
 from engine.resolver import resolve_selection
-from engine.solvent import SolventUniverse, build_solvent
+from engine.solvent import (
+    SolventUniverse,
+    build_solvent,
+    distance_resindices,
+    resolve_probe_mode,
+    solvent_positions,
+)
 from engine.soz_eval import EvaluationContext, evaluate_node
 from engine.stats import StatsAccumulator
 from engine.units import to_internal_length
@@ -136,18 +142,13 @@ class SOZAnalysisEngine:
                 logger.warning("No valid box vectors found; PBC distances may be unreliable.")
 
         solvent = build_solvent(universe, self.project.solvent)
-        if len(solvent.atoms_oxygen) == len(solvent.atoms_all):
-            warnings.append(
-                "Solvent oxygen selection empty; using all solvent atoms for O-mode distances."
-            )
-            if logger:
-                logger.warning("Solvent oxygen selection empty; using all solvent atoms for O-mode distances.")
         if logger:
             logger.info(
-                "Solvent residues: %d | atoms_all: %d | atoms_oxygen: %d | index_shift: %d",
+                "Solvent residues: %d | atoms_all: %d | probe_atoms: %d | probe_position: %s | index_shift: %d",
                 len(solvent.residues),
                 len(solvent.atoms_all),
-                len(solvent.atoms_oxygen),
+                len(solvent.probe.atoms),
+                solvent.probe.position,
                 solvent.atom_index_shift,
             )
         resolved_selections = self._resolve_selections(universe)
@@ -161,8 +162,9 @@ class SOZAnalysisEngine:
                 )
         context = EvaluationContext(universe=universe, solvent=solvent, selections=resolved_selections)
 
-        soz_use_all_atoms = {
-            soz.name: _soz_uses_all_atoms(soz.root) for soz in self.project.sozs
+        min_distance_modes = {
+            soz.name: _min_distance_mode(soz.root, solvent.probe.position)
+            for soz in self.project.sozs
         }
 
         options = self.project.analysis
@@ -213,6 +215,17 @@ class SOZAnalysisEngine:
         hydration_residue_groups = {
             cfg.name: universe.select_atoms(cfg.residue_selection).residues for cfg in hydration_configs
         }
+        hydration_modes: Dict[str, str] = {}
+        for cfg in hydration_configs:
+            if cfg.probe_mode is None:
+                warnings.append(
+                    f"Hydration '{cfg.name}' probe_mode not set; using all solvent atoms (legacy behavior)."
+                )
+                hydration_modes[cfg.name] = "all"
+            else:
+                hydration_modes[cfg.name] = resolve_probe_mode(
+                    cfg.probe_mode, solvent.probe.position
+                )
 
         for sample_index, frame_index in enumerate(frame_indices):
             if cancel_flag and cancel_flag():
@@ -248,7 +261,7 @@ class SOZAnalysisEngine:
                             solvent,
                             frame_set,
                             context.pbc_box,
-                            use_oxygen=not soz_use_all_atoms.get(soz.name, False),
+                            mode=min_distance_modes.get(soz.name, solvent.probe.position),
                         )
                     soz_frame_data[soz.name].min_distances.append(min_distances)
 
@@ -272,6 +285,7 @@ class SOZAnalysisEngine:
                     solvent,
                     frame_sets_current.get(soz_name, set()),
                     context.pbc_box,
+                    hydration_modes.get(cfg.name, solvent.probe.position),
                 )
 
             if progress:
@@ -372,6 +386,58 @@ class SOZAnalysisEngine:
         except Exception:
             time_unit = None
 
+        probe_counts = [len(v) for v in solvent.probe.resindex_to_atom_indices.values()]
+        probe_summary = {
+            "selection": solvent.probe.selection,
+            "position": solvent.probe.position,
+            "probe_atom_count": len(solvent.probe.atom_indices),
+            "solvent_residue_count": len(solvent.residues),
+            "residues_with_probe": sum(1 for count in probe_counts if count > 0),
+            "residues_multi_probe": sum(1 for count in probe_counts if count > 1),
+            "probe_atoms_per_residue_min": min(probe_counts) if probe_counts else 0,
+            "probe_atoms_per_residue_max": max(probe_counts) if probe_counts else 0,
+            "probe_source": getattr(self.project.solvent, "probe_source", None),
+        }
+
+        resolved_selection_info = {
+            label: {
+                "selection": sel.selection_string,
+                "count": len(sel.group),
+            }
+            for label, sel in resolved_selections.items()
+        }
+
+        soz_definitions = {
+            soz.name: _node_qc_entries(soz.root, solvent.probe.position)
+            for soz in self.project.sozs
+        }
+
+        bridge_definitions = {
+            bridge.name: {
+                "selection_a": bridge.selection_a,
+                "selection_b": bridge.selection_b,
+                "probe_mode": resolve_probe_mode(bridge.atom_mode, solvent.probe.position),
+                "cutoff_a": bridge.cutoff_a,
+                "cutoff_b": bridge.cutoff_b,
+                "unit": bridge.unit,
+                "cutoff_a_nm": to_internal_length(bridge.cutoff_a, bridge.unit),
+                "cutoff_b_nm": to_internal_length(bridge.cutoff_b, bridge.unit),
+            }
+            for bridge in self.project.bridges
+        }
+
+        hydration_definitions = {
+            cfg.name: {
+                "residue_selection": cfg.residue_selection,
+                "probe_mode": hydration_modes.get(cfg.name, solvent.probe.position),
+                "cutoff": cfg.cutoff,
+                "unit": cfg.unit,
+                "cutoff_nm": to_internal_length(cfg.cutoff, cfg.unit),
+                "soz_name": cfg.soz_name,
+            }
+            for cfg in hydration_configs
+        }
+
         qc_summary = {
             "preflight": preflight.to_dict(),
             "versions": versions,
@@ -381,6 +447,11 @@ class SOZAnalysisEngine:
             "zero_occupancy_sozs": zero_occupancy,
             "occupancy_definition": "n_solvent = solvent residues meeting the SOZ logic tree per frame",
             "time_unit": time_unit or "ps",
+            "probe_definition": probe_summary,
+            "resolved_selections": resolved_selection_info,
+            "soz_definitions": soz_definitions,
+            "bridge_definitions": bridge_definitions,
+            "hydration_definitions": hydration_definitions,
         }
 
         return AnalysisResult(
@@ -398,28 +469,15 @@ def _min_distance_to_soz(
     solvent: SolventUniverse,
     frame_set: set[int],
     box,
-    use_oxygen: bool = True,
+    mode: str,
 ) -> float:
     if not frame_set or len(seed_group) == 0:
         return float("nan")
-    if use_oxygen:
-        if len(solvent.atoms_oxygen) == 0:
-            return float("nan")
-        resindices = np.asarray(solvent.atom_to_resindex_oxygen, dtype=int)
-        if resindices.size == 0:
-            return float("nan")
-        mask = np.isin(resindices, list(frame_set))
-        if not np.any(mask):
-            return float("nan")
-        solvent_atoms = solvent.atoms_oxygen[mask]
-    else:
-        atom_indices = []
-        for resindex in sorted(frame_set):
-            atom_indices.extend(solvent.record_by_resindex[resindex].atom_indices)
-        if atom_indices:
-            atom_indices = [idx for idx in atom_indices if 0 <= idx < solvent.n_atoms]
-        solvent_atoms = solvent.atoms_all.universe.atoms[atom_indices]
-    dist = distances.distance_array(seed_group.positions, solvent_atoms.positions, box=box)
+    seed_pos = seed_group.positions
+    solvent_pos, _ = solvent_positions(solvent, mode, resindices=frame_set)
+    if solvent_pos.size == 0:
+        return float("nan")
+    dist = distances.distance_array(seed_pos, solvent_pos, box=box)
     return float(np.min(dist)) if dist.size else float("nan")
 
 
@@ -447,92 +505,61 @@ def _bridge_frame_set(
     cutoff_a_nm = to_internal_length(bridge.cutoff_a, bridge.unit)
     cutoff_b_nm = to_internal_length(bridge.cutoff_b, bridge.unit)
 
-    if bridge.atom_mode.lower() == "all":
-        solvent_atoms = solvent.atoms_all
-        atom_map = solvent.atom_to_resindex_all
-    else:
-        solvent_atoms = solvent.atoms_oxygen
-        atom_map = solvent.atom_to_resindex_oxygen
-
-    set_a = _distance_resindices(
-        selection_a, solvent_atoms, atom_map, cutoff_a_nm, context.pbc_box
+    mode = resolve_probe_mode(bridge.atom_mode, solvent.probe.position)
+    solvent_pos, atom_map = solvent_positions(solvent, mode)
+    set_a = distance_resindices(
+        selection_a.positions, solvent_pos, atom_map, cutoff_a_nm, context.pbc_box
     )
-    set_b = _distance_resindices(
-        selection_b, solvent_atoms, atom_map, cutoff_b_nm, context.pbc_box
+    set_b = distance_resindices(
+        selection_b.positions, solvent_pos, atom_map, cutoff_b_nm, context.pbc_box
     )
     return set_a & set_b
 
 
-def _distance_resindices(
-    seed_group: mda.core.groups.AtomGroup,
-    solvent_atoms: mda.core.groups.AtomGroup,
-    atom_map: list[int],
-    cutoff_nm: float,
-    box,
-) -> set[int]:
-    if len(seed_group) == 0 or len(solvent_atoms) == 0:
-        return set()
-    try:
-        pairs = distances.capped_distance(
-            seed_group.positions,
-            solvent_atoms.positions,
-            max_cutoff=cutoff_nm,
-            box=box,
-            return_distances=False,
-        )
-        if pairs is None:
-            return set()
-        if isinstance(pairs, tuple):
-            pair_indices = pairs[0]
-        else:
-            pair_indices = pairs
-        if len(pair_indices) == 0:
-            return set()
-        solvent_atom_indices = pair_indices[:, 1]
-        if solvent_atom_indices.size:
-            min_idx = int(solvent_atom_indices.min())
-            max_idx = int(solvent_atom_indices.max())
-            if min_idx >= 1 and max_idx == len(atom_map):
-                solvent_atom_indices = solvent_atom_indices - 1
-            if min_idx < 0 or max_idx >= len(atom_map):
-                solvent_atom_indices = solvent_atom_indices[
-                    (solvent_atom_indices >= 0) & (solvent_atom_indices < len(atom_map))
-                ]
-        if solvent_atom_indices.size == 0:
-            return set()
-        resindices: set[int] = set()
-        atom_map_len = len(atom_map)
-        for idx in solvent_atom_indices:
-            idx_i = int(idx)
-            if 0 <= idx_i < atom_map_len:
-                resindices.add(atom_map[idx_i])
-        return resindices
-    except Exception:
-        dist = distances.distance_array(
-            seed_group.positions,
-            solvent_atoms.positions,
-            box=box,
-        )
-        if dist.size == 0:
-            return set()
-        min_dist = dist.min(axis=0)
-        solvent_atom_indices = np.where(min_dist <= cutoff_nm)[0]
-        if solvent_atom_indices.size == 0:
-            return set()
-        resindices: set[int] = set()
-        atom_map_len = len(atom_map)
-        for idx in solvent_atom_indices:
-            idx_i = int(idx)
-            if 0 <= idx_i < atom_map_len:
-                resindices.add(atom_map[idx_i])
-        return resindices
-
-
-def _soz_uses_all_atoms(node: SOZNode) -> bool:
+def _collect_probe_modes(node: SOZNode, default_position: str) -> set[str]:
+    modes: set[str] = set()
     if node.type in ("distance", "shell"):
-        atom_mode = str(node.params.get("atom_mode", "O")).lower()
-        return atom_mode == "all"
-    return any(_soz_uses_all_atoms(child) for child in node.children)
+        raw_mode = node.params.get("probe_mode", node.params.get("atom_mode", "probe"))
+        modes.add(resolve_probe_mode(raw_mode, default_position))
+    for child in node.children:
+        modes |= _collect_probe_modes(child, default_position)
+    return modes
+
+
+def _min_distance_mode(node: SOZNode, default_position: str) -> str:
+    modes = _collect_probe_modes(node, default_position)
+    if "all" in modes:
+        return "all"
+    if "atom" in modes:
+        return "atom"
+    return resolve_probe_mode("probe", default_position)
+
+
+def _node_qc_entries(node: SOZNode, default_position: str) -> List[Dict[str, object]]:
+    entries: List[Dict[str, object]] = []
+    if node.type in ("distance", "shell"):
+        raw_mode = node.params.get("probe_mode", node.params.get("atom_mode", "probe"))
+        unit = node.params.get("unit", "A")
+        entry: Dict[str, object] = {
+            "type": node.type,
+            "selection_label": node.params.get("selection_label")
+            or node.params.get("seed_label")
+            or node.params.get("seed"),
+            "probe_mode": resolve_probe_mode(raw_mode, default_position),
+            "unit": unit,
+        }
+        if node.type == "distance":
+            cutoff = float(node.params.get("cutoff", 3.5))
+            entry["cutoff"] = cutoff
+            entry["cutoff_nm"] = to_internal_length(cutoff, unit)
+        else:
+            cutoffs = [float(val) for val in node.params.get("cutoffs", [3.5])]
+            entry["cutoffs"] = cutoffs
+            entry["cutoffs_nm"] = [to_internal_length(val, unit) for val in cutoffs]
+        entries.append(entry)
+    for child in node.children:
+        entries.extend(_node_qc_entries(child, default_position))
+    return entries
 
 
 def _update_hydration_counts(
@@ -542,23 +569,19 @@ def _update_hydration_counts(
     solvent: SolventUniverse,
     frame_set: set[int],
     box,
+    mode: str,
 ) -> None:
     if len(residues) == 0:
         return
     if not frame_set:
         return
-    atom_indices = []
-    for resindex in sorted(frame_set):
-        atom_indices.extend(solvent.record_by_resindex[resindex].atom_indices)
-    if atom_indices:
-        atom_indices = [idx for idx in atom_indices if 0 <= idx < solvent.n_atoms]
-    solvent_atoms = solvent.atoms_all.universe.atoms[atom_indices]
-    if len(solvent_atoms) == 0:
+    solvent_pos, _ = solvent_positions(solvent, mode, resindices=frame_set)
+    if solvent_pos.size == 0:
         return
     cutoff_nm = to_internal_length(cfg.cutoff, cfg.unit)
     pairs = distances.capped_distance(
         residues.atoms.positions,
-        solvent_atoms.positions,
+        solvent_pos,
         max_cutoff=cutoff_nm,
         box=box,
         return_distances=False,

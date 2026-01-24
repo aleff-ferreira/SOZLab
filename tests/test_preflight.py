@@ -6,6 +6,7 @@ import MDAnalysis as mda
 from engine.models import (
     ProjectConfig,
     InputConfig,
+    ProbeConfig,
     SolventConfig,
     SelectionSpec,
     SOZDefinition,
@@ -40,7 +41,11 @@ def _make_project(selection: str, water_resnames=None):
     )
     return ProjectConfig(
         inputs=InputConfig(topology="dummy"),
-        solvent=SolventConfig(water_resnames=water_resnames, water_oxygen_names=["O"]),
+        solvent=SolventConfig(
+            water_resnames=water_resnames,
+            water_oxygen_names=["O"],
+            probe=ProbeConfig(selection="name O", position="atom"),
+        ),
         selections={"selection_a": sel},
         sozs=[SOZDefinition(name="SOZ_1", description="", root=root)],
         analysis=AnalysisOptions(),
@@ -69,7 +74,7 @@ def test_preflight_solvent_mismatch():
     project = _make_project("name O", water_resnames=["TIP3"])
     report = run_preflight(project, u)
     assert not report.ok
-    assert any("Water resnames did not match" in err for err in report.errors)
+    assert any("Solvent resnames did not match" in err for err in report.errors)
 
 
 def test_preflight_non_unique_seed():
@@ -101,7 +106,11 @@ def test_preflight_wildcard_resname_selection():
     )
     project = ProjectConfig(
         inputs=InputConfig(topology="dummy"),
-        solvent=SolventConfig(water_resnames=["HSD"], water_oxygen_names=["NE2"]),
+        solvent=SolventConfig(
+            water_resnames=["HSD"],
+            water_oxygen_names=["NE2"],
+            probe=ProbeConfig(selection="name NE2", position="atom"),
+        ),
         selections={"selection_a": sel},
         sozs=[SOZDefinition(name="SOZ_1", description="", root=root)],
         analysis=AnalysisOptions(),
