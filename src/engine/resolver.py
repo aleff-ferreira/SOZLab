@@ -38,6 +38,16 @@ def _build_selection(spec: SelectionSpec) -> str:
 
 _INDEX_STOP_TOKENS = {"and", "or", "not", "(", ")"}
 _INDEX_PATTERN = re.compile(r"\bindex\b", re.IGNORECASE)
+_RENAME_TYPO_PATTERN = re.compile(r"\brename\b", re.IGNORECASE)
+
+
+def sanitize_selection_string(selection: str | None) -> str:
+    text = str(selection or "").strip()
+    if not text:
+        return ""
+    # Common user typo in MDAnalysis selection syntax.
+    text = _RENAME_TYPO_PATTERN.sub("resname", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _shift_index_token(token: str, shift: int) -> str:
@@ -89,7 +99,15 @@ def _looks_one_based(indices, n_atoms: int) -> bool:
 def resolve_selection(universe: mda.Universe, spec: SelectionSpec) -> ResolvedSelection:
     n_atoms = len(universe.atoms)
     if spec.selection:
-        selection = spec.selection
+        raw_selection = spec.selection
+        selection = sanitize_selection_string(raw_selection)
+        if selection != raw_selection:
+            logger.info(
+                "Selection %s normalized from %r to %r",
+                spec.label,
+                raw_selection,
+                selection,
+            )
         if selection.strip().lower().startswith(("and ", "or ", "not ")):
             raise ValueError(
                 f"Selection '{spec.label}' starts with an operator: {selection!r}"

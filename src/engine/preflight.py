@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import difflib
 import logging
 import re
 from typing import Dict, List
@@ -10,9 +11,20 @@ import numpy as np
 import MDAnalysis as mda
 from MDAnalysis.exceptions import NoDataError
 
-from engine.models import ProjectConfig, SelectionSpec, SOZNode, BridgeConfig, ResidueHydrationConfig
+from engine.models import (
+    ProjectConfig,
+    SelectionSpec,
+    SOZNode,
+    DistanceBridgeConfig,
+
+    HbondWaterBridgeConfig,
+    HbondHydrationConfig,
+    DensityMapConfig,
+    WaterDynamicsConfig,
+)
 from engine.solvent import build_solvent, resolve_probe_mode
 from engine.units import to_internal_length
+from engine.resolver import sanitize_selection_string
 
 logger = logging.getLogger("sozlab")
 
@@ -87,14 +99,114 @@ _RESID_RE = re.compile(r"\bresid\b", re.IGNORECASE)
 _RESNUM_RE = re.compile(r"\bresnum\b", re.IGNORECASE)
 
 
+def _collect_soz_selection_labels(node: SOZNode, labels: set[str]) -> None:
+    if node.type in ("distance", "shell"):
+        label = node.params.get("selection_label") or node.params.get("seed_label") or node.params.get("seed")
+        if label:
+            labels.add(label)
+    for child in node.children:
+        _collect_soz_selection_labels(child, labels)
+
+
 def _unique_sorted(values: List[object]) -> List[object]:
-    seen = []
-    for value in values:
-        if value is None or value == "":
-            continue
-        if value not in seen:
-            seen.append(value)
-    return seen
+    try:
+        # Fast path for sortable types
+        return sorted(list(set(values)))
+    except TypeError:
+        # Fallback for mixed types that can't be compared
+        seen = set()
+        out = []
+        for value in values:
+            if value is None or value == "":
+                continue
+            if value not in seen:
+                seen.add(value)
+                out.append(value)
+        return out
+
+
+def collect_metadata_warnings(universe: mda.Universe) -> List[str]:
+    messages: List[str] = []
+    atoms = universe.atoms
+    n_atoms = len(atoms)
+
+    chainids = getattr(atoms, "chainIDs", None)
+    if chainids is None:
+        messages.append(
+            "Topology has no chain IDs; PDB exports will use 'X'. Add chain IDs if you rely on chain-based selections."
+        )
+    else:
+        chainids_arr = np.asarray(chainids, dtype=object)
+        missing_mask = np.array(
+            [cid is None or str(cid).strip() == "" for cid in chainids_arr],
+            dtype=bool,
+        )
+        missing_count = int(missing_mask.sum())
+        if missing_count == n_atoms and n_atoms > 0:
+            messages.append(
+                "All atoms are missing chain IDs; PDB exports will use 'X'. Add chain IDs if you rely on chain-based selections."
+            )
+        elif missing_count > 0:
+            messages.append(
+                f"{missing_count}/{n_atoms} atoms are missing chain IDs; PDB exports will use 'X' for those atoms."
+            )
+        invalid_mask = np.array(
+            [
+                cid is not None
+                and str(cid).strip() != ""
+                and len(str(cid).strip()) != 1
+                for cid in chainids_arr
+            ],
+            dtype=bool,
+        )
+        invalid_count = int(invalid_mask.sum())
+        if invalid_count > 0:
+            messages.append(
+                f"{invalid_count}/{n_atoms} atoms have chain IDs longer than 1 character; PDB exports will truncate them."
+            )
+
+    elements = getattr(atoms, "elements", None)
+    if elements is None:
+        messages.append(
+            "Topology has no element information; element- or mass-based analyses and PDB parsing may be unreliable."
+        )
+    else:
+        elements_arr = np.asarray(elements, dtype=object)
+        missing_mask = np.array(
+            [elem is None or str(elem).strip() == "" for elem in elements_arr],
+            dtype=bool,
+        )
+        missing_count = int(missing_mask.sum())
+        if missing_count == n_atoms and n_atoms > 0:
+            messages.append(
+                "All atoms are missing element information; element- or mass-based analyses and PDB parsing may be unreliable."
+            )
+        elif missing_count > 0:
+            messages.append(
+                f"{missing_count}/{n_atoms} atoms are missing element information; element- or mass-based analyses and PDB parsing may be unreliable."
+            )
+
+    masses = getattr(atoms, "masses", None)
+    if masses is None:
+        messages.append("Topology has no mass information; mass-based analyses may be unreliable.")
+    else:
+        try:
+            masses_arr = np.asarray(masses, dtype=float)
+            invalid_mask = np.isnan(masses_arr) | (masses_arr <= 0)
+        except (TypeError, ValueError):
+            invalid_mask = np.array(
+                [mass is None or mass == 0 for mass in masses],
+                dtype=bool,
+            )
+        invalid_count = int(np.sum(invalid_mask))
+        if invalid_count == n_atoms and n_atoms > 0:
+            messages.append("All atom masses are missing or zero; mass-based analyses may be unreliable.")
+        elif invalid_count > 0:
+            messages.append(
+                f"{invalid_count}/{n_atoms} atom masses are missing or zero; mass-based analyses may be unreliable."
+            )
+
+    return messages
 
 
 def _suggest_for_zero(
@@ -118,6 +230,38 @@ def _suggest_for_zero(
                 suggestions.append(f"Try resid instead of resnum: {alt}")
         except Exception:
             pass
+
+    resname_match = re.search(r"\bresname\s+([^\s)]+)", selection, re.IGNORECASE)
+    if resname_match:
+        requested_resname = resname_match.group(1).strip()
+        resnames_present = sorted({str(res.resname).strip() for res in universe.residues if str(res.resname).strip()})
+        upper_to_original = {name.upper(): name for name in resnames_present}
+        if requested_resname.upper() not in upper_to_original:
+            close = difflib.get_close_matches(
+                requested_resname.upper(),
+                list(upper_to_original.keys()),
+                n=3,
+                cutoff=0.45,
+            )
+            if close:
+                suggestions.append(
+                    "Did you mean resname "
+                    + ", ".join(upper_to_original[key] for key in close)
+                    + "?"
+                )
+            solvent_like = [
+                upper_to_original[key]
+                for key in ("TIP3", "HOH", "WAT", "SOL", "TIP4", "TIP5")
+                if key in upper_to_original
+            ]
+            if solvent_like:
+                suggestions.append(
+                    "Available solvent-like resnames: " + ", ".join(solvent_like)
+                )
+            if resnames_present:
+                suggestions.append(
+                    "Available resnames (sample): " + ", ".join(resnames_present[:12])
+                )
 
     if "resname" in selection.lower() and ("his" in selection.lower() or "hs" in selection.lower()):
         his_like = sorted(
@@ -182,7 +326,11 @@ def _suggest_for_multiple(group: mda.core.groups.AtomGroup) -> List[str]:
 
 
 def _check_selection(universe: mda.Universe, spec: SelectionSpec) -> SelectionCheck:
-    selection = spec.selection or ""
+    raw_selection = spec.selection or ""
+    selection = sanitize_selection_string(raw_selection)
+    prefix_suggestions: List[str] = []
+    if selection != raw_selection:
+        prefix_suggestions.append(f"Selection normalized to: {selection}")
     if not selection:
         return SelectionCheck(
             label=spec.label,
@@ -190,7 +338,7 @@ def _check_selection(universe: mda.Universe, spec: SelectionSpec) -> SelectionCh
             count=0,
             require_unique=spec.require_unique,
             expect_count=spec.expect_count,
-            suggestions=["Selection has no selection string."],
+            suggestions=prefix_suggestions + ["Selection has no selection string."],
         )
     try:
         group = universe.select_atoms(selection)
@@ -201,14 +349,38 @@ def _check_selection(universe: mda.Universe, spec: SelectionSpec) -> SelectionCh
             count=0,
             require_unique=spec.require_unique,
             expect_count=spec.expect_count,
-            suggestions=[f"Selection error: {exc}"],
+            suggestions=prefix_suggestions + [f"Selection error: {exc}"],
         )
 
-    resids = _unique_sorted([int(atom.residue.resid) for atom in group])
-    resnums = _unique_sorted([getattr(atom.residue, "resnum", None) for atom in group])
-    segids = _unique_sorted([str(atom.residue.segid) for atom in group])
-    chain_ids = _unique_sorted([getattr(atom.residue, "chainID", "") for atom in group])
-    moltypes = _unique_sorted([getattr(atom.residue, "moltype", "") for atom in group])
+    # Optimize using vectorized access where possible
+    # Note: group.resids is already available.
+    resids = sorted(np.unique(group.resids).tolist()) 
+    
+    # MDAnalysis might not cache residue attributes on the group, but we can access them.
+    # Safe way: iterate residues (much fewer than atoms)
+    residues = group.residues
+    
+    # Vectorized attribute access if available, else list comp over residues
+    # resnums
+    if hasattr(residues, "resnums"):
+         resnums = sorted(np.unique(residues.resnums).tolist())
+    else:
+         resnums = _unique_sorted([getattr(r, "resnum", None) for r in residues])
+
+    # segids
+    segids = sorted(np.unique([str(s) for s in residues.segids]).tolist())
+    
+    # chainIDs - check availability
+    if hasattr(residues, "chainIDs"):
+         chain_ids = sorted(np.unique([str(c) for c in residues.chainIDs]).tolist())
+    else:
+         chain_ids = _unique_sorted([getattr(r, "chainID", "") for r in residues])
+
+    # moltypes
+    if hasattr(residues, "moltypes"):
+         moltypes = sorted(np.unique([str(m) for m in residues.moltypes]).tolist())
+    else:
+         moltypes = _unique_sorted([getattr(r, "moltype", "") for r in residues])
 
     suggestions: List[str] = []
     if len(group) == 0:
@@ -227,16 +399,22 @@ def _check_selection(universe: mda.Universe, spec: SelectionSpec) -> SelectionCh
         segids=segids,
         chain_ids=chain_ids,
         moltypes=moltypes,
-        suggestions=suggestions,
+        suggestions=prefix_suggestions + suggestions,
     )
+
+
+def _check_selection_string(
+    universe: mda.Universe,
+    selection: str,
+    label: str,
+) -> SelectionCheck:
+    spec = SelectionSpec(label=label, selection=selection)
+    return _check_selection(universe, spec)
 
 
 def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightReport:
     errors: List[str] = []
     warnings: List[str] = []
-
-    if not project.sozs:
-        warnings.append("No SOZ definitions found in project.")
 
     # Trajectory sanity
     traj = universe.trajectory
@@ -263,6 +441,8 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
         "processed_trajectory": getattr(project.inputs, "processed_trajectory", None),
         "preprocessing_notes": getattr(project.inputs, "preprocessing_notes", None),
     }
+
+    warnings.extend(collect_metadata_warnings(universe))
 
     # Solvent sanity
     solvent_cfg = project.solvent
@@ -396,49 +576,239 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
         _check_node_units(soz.root, errors)
         _check_node_modes(soz.root, errors)
 
-    for bridge in project.bridges:
+    for bridge in project.distance_bridges:
         try:
             to_internal_length(1.0, bridge.unit)
         except Exception:
-            errors.append(f"Unsupported unit '{bridge.unit}' in bridge '{bridge.name}'.")
+            errors.append(
+                f"Unsupported unit '{bridge.unit}' in distance bridge '{bridge.name}'."
+            )
         try:
             resolve_probe_mode(bridge.atom_mode, project.solvent.probe.position)
         except Exception as exc:
             errors.append(
-                f"Unsupported probe mode '{bridge.atom_mode}' in bridge '{bridge.name}': {exc}"
+                f"Unsupported probe mode '{bridge.atom_mode}' in distance bridge '{bridge.name}': {exc}"
+            )
+        if bridge.selection_a not in project.selections:
+            errors.append(
+                f"Distance bridge '{bridge.name}' selection_a '{bridge.selection_a}' not found in selections."
+            )
+        if bridge.selection_b not in project.selections:
+            errors.append(
+                f"Distance bridge '{bridge.name}' selection_b '{bridge.selection_b}' not found in selections."
             )
 
-    for cfg in project.residue_hydration:
-        try:
-            to_internal_length(1.0, cfg.unit)
-        except Exception:
-            errors.append(f"Unsupported unit '{cfg.unit}' in hydration '{cfg.name}'.")
-        if cfg.probe_mode is None:
-            warnings.append(
-                f"Hydration '{cfg.name}' probe_mode not set; defaulting to all solvent atoms."
+    for bridge in project.hbond_water_bridges:
+        for label_name, selection_value in (
+            ("selection_a", bridge.selection_a),
+            ("selection_b", bridge.selection_b),
+        ):
+            if selection_value in project.selections:
+                continue
+            sel_check = _check_selection_string(
+                universe,
+                selection_value,
+                f"hbond_water_bridge:{bridge.name}:{label_name}",
             )
+            if sel_check.count == 0:
+                errors.append(
+                    f"H-bond water bridge '{bridge.name}' {label_name} '{selection_value}' resolved to 0 atoms."
+                )
+                if sel_check.suggestions:
+                    warnings.append("  Suggestions: " + " | ".join(sel_check.suggestions[:3]))
+            else:
+                warnings.append(
+                    f"H-bond water bridge '{bridge.name}' {label_name} uses a raw selection string "
+                    "(not a saved selection label)."
+                )
+        if bridge.distance <= 0:
+            errors.append(
+                f"H-bond water bridge '{bridge.name}' distance must be positive."
+            )
+        if bridge.angle <= 0:
+            errors.append(f"H-bond water bridge '{bridge.name}' angle must be positive.")
+        if bridge.water_selection:
+            sel_check = _check_selection_string(
+                universe, bridge.water_selection, f"hbond_water_bridge:{bridge.name}:water"
+            )
+            if sel_check.count == 0:
+                warnings.append(
+                    f"H-bond water bridge '{bridge.name}' water_selection resolved to 0 atoms."
+                )
+                if sel_check.suggestions:
+                    warnings.append("  Suggestions: " + " | ".join(sel_check.suggestions[:3]))
+        for label, sel in [
+            ("donors", bridge.donors_selection),
+            ("hydrogens", bridge.hydrogens_selection),
+            ("acceptors", bridge.acceptors_selection),
+        ]:
+            if sel:
+                sel_check = _check_selection_string(
+                    universe, sel, f"hbond_water_bridge:{bridge.name}:{label}"
+                )
+                if sel_check.count == 0:
+                    warnings.append(
+                        f"H-bond water bridge '{bridge.name}' {label}_selection resolved to 0 atoms."
+                    )
+                    if sel_check.suggestions:
+                        warnings.append(
+                            "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
+                        )
+
+
+
+    for cfg in project.hbond_hydration:
+        if cfg.conditioning not in ("soz", "all"):
+            errors.append(
+                f"H-bond hydration '{cfg.name}' conditioning must be 'soz' or 'all'."
+            )
+        sel_check = _check_selection_string(
+            universe, cfg.residue_selection, f"hbond_hydration:{cfg.name}"
+        )
+        if sel_check.count == 0:
+            warnings.append(
+                f"H-bond hydration '{cfg.name}' residue_selection resolved to 0 atoms."
+            )
+            if sel_check.suggestions:
+                warnings.append("  Suggestions: " + " | ".join(sel_check.suggestions[:3]))
+        if cfg.water_selection:
+            sel_check = _check_selection_string(
+                universe, cfg.water_selection, f"hbond_hydration:{cfg.name}:water"
+            )
+            if sel_check.count == 0:
+                warnings.append(
+                    f"H-bond hydration '{cfg.name}' water_selection resolved to 0 atoms."
+                )
+                if sel_check.suggestions:
+                    warnings.append("  Suggestions: " + " | ".join(sel_check.suggestions[:3]))
+        for label, sel in [
+            ("donors", cfg.donors_selection),
+            ("hydrogens", cfg.hydrogens_selection),
+            ("acceptors", cfg.acceptors_selection),
+        ]:
+            if sel:
+                sel_check = _check_selection_string(
+                    universe, sel, f"hbond_hydration:{cfg.name}:{label}"
+                )
+                if sel_check.count == 0:
+                    warnings.append(
+                        f"H-bond hydration '{cfg.name}' {label}_selection resolved to 0 atoms."
+                    )
+                    if sel_check.suggestions:
+                        warnings.append(
+                            "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
+                        )
+
+    for cfg in project.density_maps:
+        if cfg.grid_spacing <= 0:
+            errors.append(
+                f"Density map '{cfg.name}' grid_spacing must be positive."
+            )
+        if cfg.stride <= 0:
+            errors.append(f"Density map '{cfg.name}' stride must be positive.")
+        if not cfg.selection:
+            errors.append(f"Density map '{cfg.name}' selection is empty.")
         else:
+            sel_check = _check_selection_string(
+                universe, cfg.selection, f"density_map:{cfg.name}"
+            )
+            if sel_check.count == 0:
+                warnings.append(
+                    f"Density map '{cfg.name}' selection resolved to 0 atoms."
+                )
+                if sel_check.suggestions:
+                    warnings.append(
+                        "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
+                    )
+        if cfg.align and not cfg.align_selection:
+            errors.append(
+                f"Density map '{cfg.name}' align_selection required when alignment is enabled."
+            )
+        if cfg.align and cfg.align_selection:
+            sel_check = _check_selection_string(
+                universe, cfg.align_selection, f"density_map:{cfg.name}:align"
+            )
+            if sel_check.count == 0:
+                warnings.append(
+                    f"Density map '{cfg.name}' align_selection resolved to 0 atoms."
+                )
+                if sel_check.suggestions:
+                    warnings.append(
+                        "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
+                    )
+
+    for cfg in project.water_dynamics:
+        if cfg.region_mode not in ("soz", "selection"):
+            errors.append(
+                f"Water dynamics '{cfg.name}' region_mode must be 'soz' or 'selection'."
+            )
+        if cfg.region_mode == "soz" and cfg.soz_name:
+            soz_names = {soz.name for soz in project.sozs}
+            if cfg.soz_name not in soz_names:
+                errors.append(
+                    f"Water dynamics '{cfg.name}' soz_name '{cfg.soz_name}' not found."
+                )
+        if cfg.region_mode == "selection":
+            if not cfg.region_selection:
+                errors.append(
+                    f"Water dynamics '{cfg.name}' region_selection required for selection mode."
+                )
+            else:
+                sel_check = _check_selection_string(
+                    universe, cfg.region_selection, f"water_dynamics:{cfg.name}:region"
+                )
+                if sel_check.count == 0:
+                    warnings.append(
+                        f"Water dynamics '{cfg.name}' region_selection resolved to 0 atoms."
+                    )
+                    if sel_check.suggestions:
+                        warnings.append(
+                            "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
+                        )
             try:
-                resolve_probe_mode(cfg.probe_mode, project.solvent.probe.position)
+                resolve_probe_mode(cfg.region_probe_mode, project.solvent.probe.position)
             except Exception as exc:
                 errors.append(
-                    f"Unsupported probe mode '{cfg.probe_mode}' in hydration '{cfg.name}': {exc}"
+                    f"Unsupported probe mode '{cfg.region_probe_mode}' in water dynamics '{cfg.name}': {exc}"
                 )
+            try:
+                to_internal_length(1.0, cfg.region_unit)
+            except Exception:
+                errors.append(
+                    f"Unsupported unit '{cfg.region_unit}' in water dynamics '{cfg.name}'."
+                )
+        if cfg.residence_mode not in ("continuous", "intermittent"):
+            errors.append(
+                f"Water dynamics '{cfg.name}' residence_mode must be 'continuous' or 'intermittent'."
+            )
+        if cfg.solute_selection:
+            sel_check = _check_selection_string(
+                universe, cfg.solute_selection, f"water_dynamics:{cfg.name}:solute"
+            )
+            if sel_check.count == 0:
+                warnings.append(
+                    f"Water dynamics '{cfg.name}' solute_selection resolved to 0 atoms."
+                )
+                if sel_check.suggestions:
+                    warnings.append(
+                        "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
+                    )
 
     required_modes: set[str] = set()
     for soz in project.sozs:
         _collect_node_modes(soz.root, required_modes)
-    for bridge in project.bridges:
+    for bridge in project.distance_bridges:
         try:
             required_modes.add(resolve_probe_mode(bridge.atom_mode, project.solvent.probe.position))
         except Exception:
             pass
-    for cfg in project.residue_hydration:
-        if cfg.probe_mode is None:
-            required_modes.add("all")
-        else:
+
+    for cfg in project.water_dynamics:
+        if cfg.region_mode == "selection":
             try:
-                required_modes.add(resolve_probe_mode(cfg.probe_mode, project.solvent.probe.position))
+                required_modes.add(
+                    resolve_probe_mode(cfg.region_probe_mode, project.solvent.probe.position)
+                )
             except Exception:
                 pass
     if "com" in required_modes:
@@ -475,6 +845,15 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
             if selection_check.suggestions:
                 msg += " Suggestions: " + " | ".join(selection_check.suggestions[:3])
             errors.append(msg)
+
+    required_labels: set[str] = set()
+    for soz in project.sozs:
+        _collect_soz_selection_labels(soz.root, required_labels)
+    missing_labels = sorted(label for label in required_labels if label not in project.selections)
+    if missing_labels:
+        errors.append(
+            "SOZ references missing selections: " + ", ".join(missing_labels)
+        )
 
     # PBC sanity
     dims = universe.trajectory.ts.dimensions if len(universe.trajectory) else None

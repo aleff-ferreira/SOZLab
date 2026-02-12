@@ -1,10 +1,10 @@
 # PUSH PLAN: Publish SOZLab to GitHub
 
 ## Pre-flight checklist (local)
-- [ ] Review `AUDIT_REPORT.md` and confirm no sensitive data remains.
-- [ ] Update placeholder fields in `CITATION.cff` and `SECURITY.md`.
-- [ ] Verify `docs/tutorial.pdf` is up to date.
-- [ ] Ensure `.local_quarantine/` and outputs are ignored.
+- [ ] Review the repo for sensitive data (tokens, private keys, machine-specific secrets).
+- [ ] Confirm `CITATION.cff` metadata is final.
+- [ ] Verify `docs/tutorial.pdf` is up to date (if you keep the PDF in-repo).
+- [ ] Ensure local outputs ignored by `.gitignore` are not tracked.
 
 ## Git initialization and first push
 ```bash
@@ -33,4 +33,4 @@ git push origin v0.1.1
 - [ ] Enable secret scanning and push protection.
 - [ ] Enable Dependabot alerts.
 - [ ] Add repository topics (e.g., gromacs, mdanalysis, solvent).
-- [ ] Create a GitHub Release for `v0.1.1` and paste notes from `CHANGELOG.md`.
+- [ ] Create a GitHub Release for `v0.1.1` and paste notes from `CHANGELOG_TUTORIAL.md`.

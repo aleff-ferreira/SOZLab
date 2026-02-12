@@ -1,51 +1,41 @@
-# Local-only quarantine
-.local_quarantine/
-
-# Python caches and artifacts
+# Python cache/bytecode
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+
+# Packaging/build artifacts
 *.egg-info/
 build/
 dist/
+.eggs/
+pip-wheel-metadata/
 
-# Virtual environments
-.venv/
-.venv_tutorial/
-venv/
-
-# Test caches
+# Tool caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
-# IDE/editor
-.vscode/
-.idea/
-*.swp
-*.swo
+# Local virtual environments
+venv/
+.venv/
+env/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs and temp
-*.log
-*.tmp
-
-# Outputs
+# Local run outputs and temporary artifacts
 results/
-out/
-output/
-outputs/
-report/
+bench_results/
+repro_results/
+reproduce_results/
+reproduce_tmp/
+test_run_tmp/
+artifacts/
+*.prof
+test_output.txt
 
-# Large trajectory and simulation data (keep small samples in examples/ if needed)
-*.xtc
-*.trr
-*.dcd
-*.tpr
-*.top
-*.edr
-*.cpt
-*.xvg
-*.gro
+# Misc local files
+*.log
+core
+core.*
+.DS_Store

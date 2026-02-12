@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import MDAnalysis as mda
 
+from engine.preflight import collect_metadata_warnings
 from engine.serialization import to_jsonable
 
 
@@ -184,31 +185,31 @@ def write_extracted_trajectory(
             if progress_cb:
                 progress_cb(i, total, "Writing extracted trajectory")
 
+    metadata_warnings = collect_metadata_warnings(universe)
+    seen = set(metadata_warnings)
     universe.trajectory[frame_indices[0]]
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*Found no information for attr.*",
-            category=UserWarning,
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*Found chainIDs with invalid length.*",
-            category=UserWarning,
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*Atom with index >=100000 cannot write bonds.*",
-            category=UserWarning,
-        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         universe.atoms.write(ref_path)
+    if caught:
+        for warning in caught:
+            message = str(warning.message)
+            if message and message not in seen:
+                metadata_warnings.append(message)
+                seen.add(message)
     selection.manifest.to_csv(manifest_path, index=False)
+    params_payload = dict(selection.params)
+    if metadata_warnings:
+        params_payload["warnings"] = metadata_warnings
     with open(params_path, "w", encoding="utf-8") as handle:
-        json.dump(to_jsonable(selection.params), handle, indent=2)
+        json.dump(to_jsonable(params_payload), handle, indent=2)
 
-    return {
+    outputs = {
         "trajectory": traj_path,
         "reference": ref_path,
         "manifest": manifest_path,
         "params": params_path,
     }
+    if metadata_warnings:
+        outputs["warnings"] = metadata_warnings
+    return outputs

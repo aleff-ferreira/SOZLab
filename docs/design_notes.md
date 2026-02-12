@@ -1,32 +1,45 @@
 # Design Notes
 
-## SOZ Logic-Tree Representation
-SOZ definitions are stored as a tree of `SOZNode` objects. Each node returns a set of solvent residue indices:
-- `distance`: solvent residues within a cutoff of a selection atom group.
-- `shell`: iterative shell expansion around a selection (cutoffs list).
-- Boolean nodes: `and`, `or`, `not` combine child sets.
+## 1. Core analysis model
+SOZ definitions are stored as `SOZNode` logic trees and evaluated per frame as solvent-residue sets.
+Primary occupancy metrics are derived from these sets (`n_solvent`, entries, exits, residence summaries).
 
-Nodes are serialized in project JSON files to ensure reproducibility and session portability.
+## 2. Current product scope
+Current UI/CLI scope is intentionally narrower than historical internal modules.
+Exposed workflow includes:
+- SOZ occupancy analysis
+- distance bridges
+- density maps and density exploration
+- extraction/report/export
 
-## Periodic Boundary Conditions (PBC)
-Distance calculations use MDAnalysis distance routines with `box` vectors from the trajectory:
-- Preferred: `capped_distance` for efficient minimum-image distances.
-- Fallback: `distance_array` if needed.
-When no box vectors are present, the engine emits a warning and still computes Euclidean distances.
+H-bond bridge, H-bond hydration, and water-dynamics configs are currently stripped at runtime.
 
-## Indexing Strategy
-Selection resolution supports:
-- MDAnalysis selection strings
-- GROMACS 1-based atom indices
-- PDB serials and resid/resname/atomname constraints
+## 3. UI simplification choices
+Recent UI decisions prioritize clarity and reduced control clutter:
+- Timeline uses fixed `n_solvent` as primary metric.
+- Histogram uses a single unified distribution (no visible zero/non-zero split panel).
+- Entry/Exit view keeps only mode + axis/sign controls.
+- Distance Bridge explorer keeps the three main plots with a single export action.
+- Density explorer keeps view/colormap/slice controls; no density-map dropdown in the top toolbar.
 
-Solvent identifiers are stable strings of `resname:resid:segid`, and per-frame lists are ordered deterministically by `(resname, resid, segid, resindex)`.
+## 4. Plot context menu policy
+Plot right-click menus are simplified to:
+- `Export`
+- `Plot Options` with only `Grid` and `Alpha`
 
-## Performance Strategy
-- Trajectory streaming: frames are processed iteratively; no full-trajectory load.
-- Vectorized distances: `capped_distance` and `distance_array` for batch computations.
-- GUI responsiveness: analysis runs in a worker thread with progress updates.
-- Plot downsampling in the GUI for large datasets.
+This avoids exposing lower-level pyqtgraph actions that are not part of the intended user workflow.
 
-## Reproducibility
-Project JSON files capture inputs, SOZ definitions, analysis options, and outputs. The report includes metadata snapshots for auditability.
+## 5. 3D density viewer
+The 3D viewer (`viz_3d.py`) uses local NGL assets and a Qt WebEngine bridge.
+Current controls are grouped into sections:
+- Density
+- Layers
+- Render
+- Pick
+- Insights
+
+Structure selection for the 3D overlay is constrained to avoid over-large PDB exports that can break rendering.
+
+## 6. PBC and units
+Distance calculations use trajectory box vectors (minimum image) when available; warnings are emitted when box metadata is missing.
+Length cutoffs accept `A` or `nm` in configs (converted internally as needed).

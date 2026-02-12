@@ -78,6 +78,7 @@
     "frame_stop": null,
     "stride": 1,
     "gap_tolerance": 1,
+    "workers": 0,
     "store_ids": true,
     "store_min_distances": true,
     "preview_frames": 2
@@ -88,7 +89,7 @@
     "write_parquet": false,
     "report_format": "md"
   },
-  "bridges": [
+  "distance_bridges": [
     {
       "name": "bridge_A_B",
       "selection_a": "selection_a",
@@ -99,14 +100,18 @@
       "atom_mode": "probe"
     }
   ],
-  "residue_hydration": [
+  "hbond_water_bridges": [],
+  "distance_solvent_contacts": [
     {
-      "name": "hydration_shell_only",
+      "name": "distance_contact_shell_only",
       "residue_selection": "protein",
       "cutoff": 3.5,
       "unit": "A",
       "probe_mode": "probe",
       "soz_name": "shell_only"
     }
-  ]
+  ],
+  "hbond_hydration": [],
+  "density_maps": [],
+  "water_dynamics": []
 }
