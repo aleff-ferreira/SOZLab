@@ -1,12 +1,10 @@
-cff-version: 1.2.0
 title: SOZLab
 message: "If you use this software, please cite it as below."
 SOZLab a Linux GUI + CLI for solvent occupancy zone analysis
 authors: Aleff Ferreira Francisco
-version: 0.1.1
+version: 1.0.0
 date-released: 2025-01-23
-repository-code: https://github.com/<YOUR_GITHUB_USERNAME>/sozlab
-url: https://github.com/<YOUR_GITHUB_USERNAME>/sozlab
+url: https://github.com/aleff-ferreira/SOZLab
 license: MIT
 keywords:
   - solvent
