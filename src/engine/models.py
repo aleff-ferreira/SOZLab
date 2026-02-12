@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class SelectionSpec:
     label: str
+    display_label: Optional[str] = None
     selection: Optional[str] = None
     atom_indices: Optional[List[int]] = None
     pdb_serials: Optional[List[int]] = None
@@ -22,6 +23,7 @@ class SelectionSpec:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "label": self.label,
+            "display_label": self.display_label,
             "selection": self.selection,
             "atom_indices": self.atom_indices,
             "pdb_serials": self.pdb_serials,
@@ -38,6 +40,7 @@ class SelectionSpec:
     def from_dict(cls, data: Dict[str, Any]) -> "SelectionSpec":
         return cls(
             label=data.get("label", "selection"),
+            display_label=data.get("display_label"),
             selection=data.get("selection"),
             atom_indices=data.get("atom_indices"),
             pdb_serials=data.get("pdb_serials"),
@@ -186,6 +189,7 @@ class AnalysisOptions:
     frame_stop: Optional[int] = None
     stride: int = 1
     gap_tolerance: int = 0
+    workers: Optional[int] = None
     store_ids: bool = True
     store_min_distances: bool = True
     preview_frames: int = 200
@@ -196,6 +200,7 @@ class AnalysisOptions:
             "frame_stop": self.frame_stop,
             "stride": self.stride,
             "gap_tolerance": self.gap_tolerance,
+            "workers": self.workers,
             "store_ids": self.store_ids,
             "store_min_distances": self.store_min_distances,
             "preview_frames": self.preview_frames,
@@ -208,6 +213,7 @@ class AnalysisOptions:
             frame_stop=data.get("frame_stop"),
             stride=int(data.get("stride", 1)),
             gap_tolerance=int(data.get("gap_tolerance", 0)),
+            workers=data.get("workers"),
             store_ids=bool(data.get("store_ids", True)),
             store_min_distances=bool(data.get("store_min_distances", True)),
             preview_frames=int(data.get("preview_frames", 200)),
@@ -215,7 +221,7 @@ class AnalysisOptions:
 
 
 @dataclass
-class BridgeConfig:
+class DistanceBridgeConfig:
     name: str
     selection_a: str
     selection_b: str
@@ -232,11 +238,12 @@ class BridgeConfig:
             "cutoff_a": self.cutoff_a,
             "cutoff_b": self.cutoff_b,
             "unit": self.unit,
+            "probe_mode": self.atom_mode,
             "atom_mode": self.atom_mode,
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "BridgeConfig":
+    def from_dict(cls, data: Dict[str, Any]) -> "DistanceBridgeConfig":
         mode = data.get("probe_mode", data.get("atom_mode", "probe"))
         return cls(
             name=data.get("name", "bridge"),
@@ -265,35 +272,227 @@ class BridgeConfig:
         self.selection_b = value
 
 
+
+
 @dataclass
-class ResidueHydrationConfig:
+class HbondWaterBridgeConfig:
+    name: str
+    selection_a: str
+    selection_b: str
+    distance: float = 3.0
+    angle: float = 150.0
+    water_selection: Optional[str] = None
+    donors_selection: Optional[str] = None
+    hydrogens_selection: Optional[str] = None
+    acceptors_selection: Optional[str] = None
+    update_selections: bool = True
+    backend: str = "auto"  # "auto", "waterbridge", "hbond_analysis"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "selection_a": self.selection_a,
+            "selection_b": self.selection_b,
+            "distance": self.distance,
+            "angle": self.angle,
+            "water_selection": self.water_selection,
+            "donors_selection": self.donors_selection,
+            "hydrogens_selection": self.hydrogens_selection,
+            "acceptors_selection": self.acceptors_selection,
+            "update_selections": self.update_selections,
+            "backend": self.backend,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "HbondWaterBridgeConfig":
+        return cls(
+            name=data.get("name", "hbond_bridge"),
+            selection_a=data.get("selection_a", "protein"),
+            selection_b=data.get("selection_b", "protein"),
+            distance=float(data.get("distance", data.get("d_a_cutoff", 3.0))),
+            angle=float(data.get("angle", data.get("d_h_a_angle", 150.0))),
+            water_selection=data.get("water_selection"),
+            donors_selection=data.get("donors_selection", data.get("donors_sel")),
+            hydrogens_selection=data.get("hydrogens_selection", data.get("hydrogens_sel")),
+            acceptors_selection=data.get("acceptors_selection", data.get("acceptors_sel")),
+            update_selections=bool(data.get("update_selections", True)),
+            backend=data.get("backend", "auto"),
+        )
+
+
+@dataclass
+class HbondHydrationConfig:
     name: str
     residue_selection: str
-    cutoff: float
+    distance: float = 3.0
+    angle: float = 150.0
     unit: str = "A"
+    conditioning: str = "soz"
     soz_name: Optional[str] = None
-    probe_mode: Optional[str] = None
+    water_selection: Optional[str] = None
+    donors_selection: Optional[str] = None
+    hydrogens_selection: Optional[str] = None
+    acceptors_selection: Optional[str] = None
+    update_selections: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "residue_selection": self.residue_selection,
-            "cutoff": self.cutoff,
+            "distance": self.distance,
+            "angle": self.angle,
             "unit": self.unit,
+            "conditioning": self.conditioning,
             "soz_name": self.soz_name,
-            "probe_mode": self.probe_mode,
+            "water_selection": self.water_selection,
+            "donors_selection": self.donors_selection,
+            "hydrogens_selection": self.hydrogens_selection,
+            "acceptors_selection": self.acceptors_selection,
+            "update_selections": self.update_selections,
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ResidueHydrationConfig":
+    def from_dict(cls, data: Dict[str, Any]) -> "HbondHydrationConfig":
         return cls(
-            name=data.get("name", "hydration"),
+            name=data.get("name", "hbond_hydration"),
             residue_selection=data.get("residue_selection", "protein"),
-            cutoff=float(data.get("cutoff", 3.5)),
+            distance=float(data.get("distance", data.get("d_a_cutoff", 3.0))),
+            angle=float(data.get("angle", data.get("d_h_a_angle", 150.0))),
             unit=data.get("unit", "A"),
+            conditioning=data.get("conditioning", data.get("mode", "soz")),
             soz_name=data.get("soz_name"),
-            probe_mode=data.get("probe_mode"),
+            donors_selection=data.get("donors_selection", data.get("donors_sel")),
+            hydrogens_selection=data.get("hydrogens_selection", data.get("hydrogens_sel")),
+            acceptors_selection=data.get("acceptors_selection", data.get("acceptors_sel")),
+            update_selections=bool(data.get("update_selections", True)),
+            water_selection=data.get("water_selection"),
         )
+
+
+@dataclass
+class DensityMapConfig:
+    name: str
+    species_selection: str
+    grid_spacing: float = 1.0
+    padding: float = 2.0
+    stride: int = 1
+    frame_start: Optional[int] = None
+    frame_stop: Optional[int] = None
+    align: bool = False
+    align_selection: Optional[str] = None
+    align_reference: str = "first_frame"
+    align_reference_path: Optional[str] = None
+    output_format: str = "dx"
+    view_mode: str = "physical"
+    conditioning_policy: str = "strict"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "species_selection": self.species_selection,
+            "grid_spacing": self.grid_spacing,
+            "padding": self.padding,
+            "stride": self.stride,
+            "frame_start": self.frame_start,
+            "frame_stop": self.frame_stop,
+            "align": self.align,
+            "align_selection": self.align_selection,
+            "align_reference": self.align_reference,
+            "align_reference_path": self.align_reference_path,
+            "output_format": self.output_format,
+            "view_mode": self.view_mode,
+            "conditioning_policy": self.conditioning_policy,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DensityMapConfig":
+        return cls(
+            name=data.get("name", "density_map"),
+            species_selection=data.get("species_selection", data.get("selection", "")),
+            grid_spacing=float(data.get("grid_spacing", data.get("delta", 1.0))),
+            padding=float(data.get("padding", 2.0)),
+            stride=int(data.get("stride", 1)),
+            frame_start=data.get("frame_start"),
+            frame_stop=data.get("frame_stop"),
+            align=bool(data.get("align", False)),
+            align_selection=data.get("align_selection"),
+            align_reference=data.get("align_reference", "first_frame"),
+            align_reference_path=data.get("align_reference_path"),
+            output_format=data.get("output_format", "dx"),
+            view_mode=data.get("view_mode", "physical"),
+            conditioning_policy=data.get("conditioning_policy", "strict"),
+        )
+
+    @property
+    def selection(self) -> str:
+        return self.species_selection
+
+    @selection.setter
+    def selection(self, value: str) -> None:
+        self.species_selection = value
+
+
+@dataclass
+class WaterDynamicsConfig:
+    name: str
+    region_mode: str = "soz"
+    soz_name: Optional[str] = None
+    region_selection: Optional[str] = None
+    region_cutoff: float = 3.5
+    region_unit: str = "A"
+    region_probe_mode: str = "probe"
+    residence_mode: str = "continuous"
+    hbond_distance: float = 3.0
+    hbond_angle: float = 150.0
+    solute_selection: Optional[str] = None
+    water_selection: Optional[str] = None
+    donors_selection: Optional[str] = None
+    acceptors_selection: Optional[str] = None
+    update_selections: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "region_mode": self.region_mode,
+            "soz_name": self.soz_name,
+            "region_selection": self.region_selection,
+            "region_cutoff": self.region_cutoff,
+            "region_unit": self.region_unit,
+            "region_probe_mode": self.region_probe_mode,
+            "residence_mode": self.residence_mode,
+            "hbond_distance": self.hbond_distance,
+            "hbond_angle": self.hbond_angle,
+            "solute_selection": self.solute_selection,
+            "water_selection": self.water_selection,
+            "donors_selection": self.donors_selection,
+            "acceptors_selection": self.acceptors_selection,
+            "update_selections": self.update_selections,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "WaterDynamicsConfig":
+        return cls(
+            name=data.get("name", "water_dynamics"),
+            region_mode=data.get("region_mode", data.get("mode", "soz")),
+            soz_name=data.get("soz_name"),
+            region_selection=data.get("region_selection"),
+            region_cutoff=float(data.get("region_cutoff", 3.5)),
+            region_unit=data.get("region_unit", "A"),
+            region_probe_mode=data.get("region_probe_mode", data.get("probe_mode", "probe")),
+            residence_mode=data.get("residence_mode", data.get("residence", "continuous")),
+            hbond_distance=float(data.get("hbond_distance", data.get("distance", 3.0))),
+            hbond_angle=float(data.get("hbond_angle", data.get("angle", 150.0))),
+            solute_selection=data.get("solute_selection"),
+            water_selection=data.get("water_selection"),
+            donors_selection=data.get("donors_selection"),
+            acceptors_selection=data.get("acceptors_selection"),
+            update_selections=bool(data.get("update_selections", True)),
+        )
+
+
+# Backwards-compatible aliases
+BridgeConfig = DistanceBridgeConfig
+
 
 
 @dataclass
@@ -386,8 +585,12 @@ class ProjectConfig:
     analysis: AnalysisOptions
     outputs: OutputConfig
     extraction: ExtractionConfig = field(default_factory=ExtractionConfig)
-    bridges: List[BridgeConfig] = field(default_factory=list)
-    residue_hydration: List[ResidueHydrationConfig] = field(default_factory=list)
+    distance_bridges: List[DistanceBridgeConfig] = field(default_factory=list)
+    hbond_water_bridges: List[HbondWaterBridgeConfig] = field(default_factory=list)
+
+    hbond_hydration: List[HbondHydrationConfig] = field(default_factory=list)
+    density_maps: List[DensityMapConfig] = field(default_factory=list)
+    water_dynamics: List[WaterDynamicsConfig] = field(default_factory=list)
     version: str = "1.0"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -400,8 +603,12 @@ class ProjectConfig:
             "analysis": self.analysis.to_dict(),
             "outputs": self.outputs.to_dict(),
             "extraction": self.extraction.to_dict(),
-            "bridges": [bridge.to_dict() for bridge in self.bridges],
-            "residue_hydration": [cfg.to_dict() for cfg in self.residue_hydration],
+            "distance_bridges": [bridge.to_dict() for bridge in self.distance_bridges],
+            "hbond_water_bridges": [bridge.to_dict() for bridge in self.hbond_water_bridges],
+
+            "hbond_hydration": [cfg.to_dict() for cfg in self.hbond_hydration],
+            "density_maps": [cfg.to_dict() for cfg in self.density_maps],
+            "water_dynamics": [cfg.to_dict() for cfg in self.water_dynamics],
         }
 
     @classmethod
@@ -414,18 +621,40 @@ class ProjectConfig:
         analysis = AnalysisOptions.from_dict(data.get("analysis", {}))
         outputs = OutputConfig.from_dict(data.get("outputs", {}))
         extraction = ExtractionConfig.from_dict(data.get("extraction", {}))
-        bridges = [BridgeConfig.from_dict(item) for item in data.get("bridges", [])]
-        residue_hydration = [ResidueHydrationConfig.from_dict(item) for item in data.get("residue_hydration", [])]
+        distance_bridges = [
+            DistanceBridgeConfig.from_dict(item)
+            for item in data.get("distance_bridges", data.get("bridges", []))
+        ]
+        hbond_water_bridges = [
+            HbondWaterBridgeConfig.from_dict(item)
+            for item in data.get("hbond_water_bridges", [])
+        ]
+
+        hbond_hydration = [
+            HbondHydrationConfig.from_dict(item) for item in data.get("hbond_hydration", [])
+        ]
+        density_maps = [DensityMapConfig.from_dict(item) for item in data.get("density_maps", [])]
+        water_dynamics = [
+            WaterDynamicsConfig.from_dict(item) for item in data.get("water_dynamics", [])
+        ]
         return cls(
             inputs=inputs,
             solvent=solvent,
-            selections=_normalize_selection_labels(selections, sozs, bridges),
+            selections=_normalize_selection_labels(
+                selections,
+                sozs,
+                distance_bridges,
+                hbond_water_bridges,
+            ),
             sozs=sozs,
             analysis=analysis,
             outputs=outputs,
             extraction=extraction,
-            bridges=bridges,
-            residue_hydration=residue_hydration,
+            distance_bridges=distance_bridges,
+            hbond_water_bridges=hbond_water_bridges,
+            hbond_hydration=hbond_hydration,
+            density_maps=density_maps,
+            water_dynamics=water_dynamics,
             version=data.get("version", "1.0"),
         )
 
@@ -437,11 +666,21 @@ class ProjectConfig:
     def seeds(self, value: Dict[str, SelectionSpec]) -> None:
         self.selections = value
 
+    @property
+    def bridges(self) -> List[DistanceBridgeConfig]:
+        return self.distance_bridges
+
+    @bridges.setter
+    def bridges(self, value: List[DistanceBridgeConfig]) -> None:
+        self.distance_bridges = value
+
+
 
 def _normalize_selection_labels(
     selections: Dict[str, SelectionSpec],
     sozs: List[SOZDefinition],
-    bridges: List[BridgeConfig],
+    distance_bridges: List[DistanceBridgeConfig],
+    hbond_bridges: List[HbondWaterBridgeConfig],
 ) -> Dict[str, SelectionSpec]:
     mapping = {}
     normalized = {}
@@ -457,7 +696,12 @@ def _normalize_selection_labels(
     if mapping:
         for soz in sozs:
             _rewrite_soz_labels(soz.root, mapping)
-        for bridge in bridges:
+        for bridge in distance_bridges:
+            if bridge.selection_a in mapping:
+                bridge.selection_a = mapping[bridge.selection_a]
+            if bridge.selection_b in mapping:
+                bridge.selection_b = mapping[bridge.selection_b]
+        for bridge in hbond_bridges:
             if bridge.selection_a in mapping:
                 bridge.selection_a = mapping[bridge.selection_a]
             if bridge.selection_b in mapping:

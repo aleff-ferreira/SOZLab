@@ -68,8 +68,8 @@ def export_results(result: AnalysisResult, project: ProjectConfig) -> None:
                 project.outputs.write_parquet,
             )
 
-    for name, bridge_result in result.bridge_results.items():
-        bridge_dir = os.path.join(output_dir, f"bridge_{name}")
+    for name, bridge_result in result.distance_bridge_results.items():
+        bridge_dir = os.path.join(output_dir, f"distance_bridge_{name}")
         os.makedirs(bridge_dir, exist_ok=True)
         _write_dataframe(
             bridge_result.per_frame,
@@ -82,11 +82,104 @@ def export_results(result: AnalysisResult, project: ProjectConfig) -> None:
             project.outputs.write_parquet,
         )
 
-    for name, hydration_result in result.hydration_results.items():
-        hydration_dir = os.path.join(output_dir, f"hydration_{name}")
+    for name, bridge_result in result.hbond_bridge_results.items():
+        bridge_dir = os.path.join(output_dir, f"hbond_water_bridge_{name}")
+        os.makedirs(bridge_dir, exist_ok=True)
+        _write_dataframe(
+            bridge_result.per_frame,
+            os.path.join(bridge_dir, "per_frame.csv"),
+            project.outputs.write_parquet,
+        )
+        _write_dataframe(
+            bridge_result.per_solvent,
+            os.path.join(bridge_dir, "per_solvent.csv"),
+            project.outputs.write_parquet,
+        )
+        if bridge_result.edge_list is not None and not bridge_result.edge_list.empty:
+            _write_dataframe(
+                bridge_result.edge_list,
+                os.path.join(bridge_dir, "edge_list.csv"),
+                project.outputs.write_parquet,
+            )
+
+
+    for name, hydration_result in result.hbond_hydration_results.items():
+        hydration_dir = os.path.join(output_dir, f"hbond_hydration_{name}")
         os.makedirs(hydration_dir, exist_ok=True)
         _write_dataframe(
             hydration_result.table,
-            os.path.join(hydration_dir, "hydration_table.csv"),
+            os.path.join(hydration_dir, "contact_table.csv"),
             project.outputs.write_parquet,
         )
+        definition = result.qc_summary.get("hbond_hydration_definitions", {}).get(name, {})
+        metadata_path = os.path.join(hydration_dir, "metadata.json")
+        temp_metadata = metadata_path + ".tmp"
+        with open(temp_metadata, "w", encoding="utf-8") as handle:
+            json.dump(
+                to_jsonable(
+                    {
+                        "definition": definition,
+                        "solvent": project.solvent.to_dict(),
+                        "analysis_frames": {
+                            "frame_start": project.analysis.frame_start,
+                            "frame_stop": project.analysis.frame_stop,
+                            "stride": project.analysis.stride,
+                        },
+                        "time_unit": result.qc_summary.get("time_unit", "ps"),
+                    }
+                ),
+                handle,
+                indent=2,
+            )
+        _atomic_replace(temp_metadata, metadata_path)
+
+    for name, density_result in result.density_results.items():
+        density_dir = os.path.join(output_dir, f"density_map_{name}")
+        os.makedirs(density_dir, exist_ok=True)
+        metadata_path = os.path.join(density_dir, "metadata.json")
+        temp_metadata = metadata_path + ".tmp"
+        with open(temp_metadata, "w", encoding="utf-8") as handle:
+            json.dump(to_jsonable(density_result.metadata), handle, indent=2)
+        _atomic_replace(temp_metadata, metadata_path)
+
+    for name, dynamics_result in result.water_dynamics_results.items():
+        dynamics_dir = os.path.join(output_dir, f"water_dynamics_{name}")
+        os.makedirs(dynamics_dir, exist_ok=True)
+        _write_dataframe(
+            dynamics_result.sp_tau,
+            os.path.join(dynamics_dir, "sp_tau.csv"),
+            project.outputs.write_parquet,
+        )
+        if dynamics_result.hbl is not None:
+            _write_dataframe(
+                dynamics_result.hbl,
+                os.path.join(dynamics_dir, "hbl.csv"),
+                project.outputs.write_parquet,
+            )
+        if dynamics_result.hbl_summary is not None:
+            _write_dataframe(
+                dynamics_result.hbl_summary,
+                os.path.join(dynamics_dir, "hbl_summary.csv"),
+                project.outputs.write_parquet,
+            )
+        if dynamics_result.wor is not None:
+            _write_dataframe(
+                dynamics_result.wor,
+                os.path.join(dynamics_dir, "wor.csv"),
+                project.outputs.write_parquet,
+            )
+        metadata_path = os.path.join(dynamics_dir, "metadata.json")
+        temp_metadata = metadata_path + ".tmp"
+        with open(temp_metadata, "w", encoding="utf-8") as handle:
+            json.dump(
+                to_jsonable(
+                    {
+                        "mean_residence_time": dynamics_result.mean_residence_time,
+                        "residence_mode": dynamics_result.residence_mode,
+                        "notes": dynamics_result.notes,
+                    }
+                ),
+                handle,
+                indent=2,
+            )
+        _atomic_replace(temp_metadata, metadata_path)

@@ -136,10 +136,17 @@ def solvent_positions(
                     f"Probe selection missing atoms for solvent residue resindex {resindex}."
                 )
             group = solvent.atoms_all.universe.atoms[atom_indices]
-            if mode_norm == "com":
-                pos = group.center_of_mass()
-            else:
-                pos = group.center_of_geometry()
+            try:
+                if mode_norm == "com":
+                    pos = group.center_of_mass(unwrap=True)
+                else:
+                    pos = group.center_of_geometry(unwrap=True)
+            except NoDataError:
+                # Fallback if bonds are missing (cannot unwrap)
+                if mode_norm == "com":
+                    pos = group.center_of_mass()
+                else:
+                    pos = group.center_of_geometry()
             positions_list.append(pos)
             mapping.append(resindex)
         return np.asarray(positions_list), mapping

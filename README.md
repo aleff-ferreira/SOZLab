@@ -1,17 +1,23 @@
 # SOZLab
 
-SOZLab is a Linux-only GUI + CLI for solvent occupancy zone (SOZ) analysis of molecular dynamics trajectories. It lets you define solvent zones around one or more seed selections, compute per-frame occupancy and entry/exit events, and export tables, plots, and extracted trajectories.
+SOZLab is a Linux GUI + CLI for solvent occupancy zone (SOZ) analysis of molecular dynamics trajectories.
 
-## What it does
-- Define SOZ logic trees (shells, distances, boolean logic) around seed selections.
-- Compute per-frame occupancy (`n_solvent`), entry/exit events, and residence summaries.
-- Visualize results in a GUI (timeline, histograms, heatmaps, event raster).
-- Export CSV/JSON outputs, reports, and extracted frame subsets.
+Current public workflow focuses on:
+- SOZ occupancy analysis (`n_solvent`, entries/exits, residence summaries)
+- Distance bridge analysis
+- Density maps (2D slices + NGL-based 3D viewer)
+- CSV/JSON/report export and frame extraction
 
-## Requirements
-- OS: Linux (GUI is Linux-only).
-- Python: 3.10+ (3.11 recommended).
-- Optional: GROMACS for preprocessing (SOZLab does not require it).
+## Entry Points
+- GUI: `sozlab-gui`
+- CLI: `sozlab-cli`
+
+CLI surface:
+```text
+usage: sozlab-cli [-h] {run,validate,extract} ...
+```
+
+Note: `python -m sozlab` is not available in this repo. Use `sozlab-cli` or `python -m cli.sozlab_cli`.
 
 ## Installation
 
@@ -19,13 +25,13 @@ SOZLab is a Linux-only GUI + CLI for solvent occupancy zone (SOZ) analysis of mo
 ```bash
 conda env create -f environment.yml
 conda activate sozlab
+pip install -e .
 ```
-This installs dependencies and exposes `sozlab-gui` and `sozlab-cli`.
 
-### Virtualenv (developer install)
+### Virtualenv
 ```bash
 python -m venv .venv
-. .venv/bin/activate
+source .venv/bin/activate
 pip install -e .
 ```
 
@@ -34,38 +40,86 @@ Optional parquet support:
 pip install -e .[parquet]
 ```
 
-## Quick start
-
-### CLI
-```bash
-sozlab-cli run --project examples/sample_project.json --output out --progress --report
-```
+## Run
 
 ### GUI
 ```bash
 sozlab-gui
 ```
-Then load `examples/sample_project.json` and click **Run**.
 
-## Outputs (overview)
-- Outputs go to `outputs.output_dir` in the project file.
-- `sozlab-cli run --output OUT` overrides the output directory for that run.
-- Extracted trajectories use `--out` (see `docs/tutorial.md`).
+### CLI
+```bash
+sozlab-cli --help
+sozlab-cli run --help
+sozlab-cli validate --help
+sozlab-cli extract --help
+```
 
-## Troubleshooting (top 5)
-1) Selection resolves to 0 atoms: check resnames, segid/chainID, and `resid` vs `resnum`.
-2) Solvent resnames mismatch: update `solvent.water_resnames` to match your topology.
-3) PBC warning: `No valid box vectors found` means distances may be unreliable.
-4) Matplotlib cache warning: set `MPLCONFIGDIR` to a writable directory.
-5) Heatmap or raster empty: ensure `analysis.store_ids=true` (or avoid `--no-ids`).
+## Tested CLI Quick Start (LAAO)
+
+Create a minimal project JSON for `/home/aleff/laao_water`:
+```bash
+python - <<'PY'
+from engine.models import (
+    ProjectConfig, InputConfig, SolventConfig, AnalysisOptions, OutputConfig,
+    SOZDefinition, SOZNode, SelectionSpec, ExtractionConfig,
+)
+from engine.analysis import write_project_json
+
+project = ProjectConfig(
+    inputs=InputConfig(
+        topology='/home/aleff/laao_water/extracted_ref.pdb',
+        trajectory='/home/aleff/laao_water/step7_production_mol_rect_3_system_10ns.xtc',
+    ),
+    solvent=SolventConfig(water_resnames=['SOL', 'HOH', 'TIP3']),
+    selections={'mysel': SelectionSpec(label='mysel', selection='resid 50')},
+    sozs=[SOZDefinition(
+        name='TestSOZ',
+        description='Test SOZ',
+        root=SOZNode(type='distance', params={'selection_label': 'mysel', 'cutoff': 4.0}),
+    )],
+    analysis=AnalysisOptions(frame_start=0, frame_stop=1001, stride=1000),
+    outputs=OutputConfig(output_dir='/tmp/sozcodex_docs_out', report_format='md'),
+    extraction=ExtractionConfig(output_dir='/tmp/sozcodex_docs_extract', rule='n_solvent>=1'),
+)
+write_project_json(project, '/tmp/sozcodex_docs_project.json')
+print('/tmp/sozcodex_docs_project.json')
+PY
+```
+
+Run validate, analysis, and extraction:
+```bash
+sozlab-cli validate --project /tmp/sozcodex_docs_project.json --max-frames 10
+sozlab-cli run --project /tmp/sozcodex_docs_project.json --output /tmp/sozcodex_docs_out --progress --report --workers 1
+sozlab-cli extract --project /tmp/sozcodex_docs_project.json --soz TestSOZ --rule "n_solvent>=1" --min-run 1 --gap 0 --out /tmp/sozcodex_docs_extract --prefix docs_demo --format xtc --workers 1
+```
+
+## Testing
+Quick default suite:
+```bash
+python -m pytest -q
+```
+
+Explicit quick profile:
+```bash
+python -m pytest -q -m "not slow"
+```
+
+Full suite (includes slow tests):
+```bash
+python -m pytest -q -m "slow or not slow"
+```
 
 ## Documentation
-- Tutorial source: `docs/tutorial.md`
-- Tutorial PDF: `docs/tutorial.pdf`
-- Additional guides: `docs/user_guide.md`, `docs/developer_guide.md`
+- `docs/tutorial.md`
+- `docs/user_guide.md`
+- `docs/developer_guide.md`
+- `docs/design_notes.md`
+
+PDF tutorial (generated): `docs/tutorial.pdf`.
 
 ## Citation
 See `CITATION.cff`.
 
 ## License
-MIT.
+MIT (`LICENSE`).

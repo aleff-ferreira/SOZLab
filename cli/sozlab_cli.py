@@ -20,8 +20,15 @@ def _progress(current: int, total: int, message: str) -> None:
         sys.stdout.write("\n")
 
 
+def _strip_removed_analysis_options(project) -> None:
+    project.hbond_water_bridges.clear()
+    project.hbond_hydration.clear()
+    project.water_dynamics.clear()
+
+
 def run_command(args: argparse.Namespace) -> None:
     project = load_project_json(args.project)
+    _strip_removed_analysis_options(project)
     if args.output:
         project.outputs.output_dir = args.output
     if args.stride is not None:
@@ -34,18 +41,37 @@ def run_command(args: argparse.Namespace) -> None:
         project.analysis.store_ids = False
     if args.no_per_frame:
         project.outputs.write_per_frame = False
+    if args.workers is not None:
+        project.analysis.workers = None if args.workers <= 0 else args.workers
 
     logger, log_path = setup_run_logger(project.outputs.output_dir)
     logger.info("CLI analysis requested")
     engine = SOZAnalysisEngine(project)
-    result = engine.run(progress=_progress if args.progress else None, logger=logger)
+    progress_state = {"total": None}
+
+    def _progress_cb(current: int, total: int, message: str) -> None:
+        progress_state["total"] = total
+        _progress(current, total, message)
+
+    result = engine.run(progress=_progress_cb if args.progress else None, logger=logger)
+    if args.progress and progress_state["total"]:
+        total = int(progress_state["total"])
+        _progress(max(total - 1, 0), total, "Writing outputs...")
     export_results(result, project)
+    if args.progress and progress_state["total"]:
+        total = int(progress_state["total"])
+        _progress(total, total, "Finalizing outputs...")
     print(f"Log written to {log_path}")
     if result.qc_summary:
         warnings = result.qc_summary.get("preflight", {}).get("warnings", [])
         if warnings:
             print("QC warnings:")
             for warning in warnings:
+                print(f"  - {warning}")
+        analysis_warnings = result.qc_summary.get("analysis_warnings", [])
+        if analysis_warnings:
+            print("Analysis warnings:")
+            for warning in analysis_warnings[:10]:
                 print(f"  - {warning}")
         zero_occupancy = result.qc_summary.get("zero_occupancy_sozs", [])
         if zero_occupancy:
@@ -58,6 +84,9 @@ def run_command(args: argparse.Namespace) -> None:
 
 def validate_command(args: argparse.Namespace) -> None:
     project = load_project_json(args.project)
+    _strip_removed_analysis_options(project)
+    if args.workers is not None:
+        project.analysis.workers = None if args.workers <= 0 else args.workers
     results = validate_project(project, max_frames=args.max_frames)
     for res in results:
         print(
@@ -69,8 +98,11 @@ def validate_command(args: argparse.Namespace) -> None:
 
 def extract_command(args: argparse.Namespace) -> None:
     project = load_project_json(args.project)
+    _strip_removed_analysis_options(project)
     if args.output:
         project.outputs.output_dir = args.output
+    if args.workers is not None:
+        project.analysis.workers = None if args.workers <= 0 else args.workers
 
     logger, log_path = setup_run_logger(project.outputs.output_dir)
     logger.info("CLI extract requested")
@@ -135,11 +167,21 @@ def main() -> None:
     )
     run_parser.add_argument("--progress", action="store_true", help="Show progress bar")
     run_parser.add_argument("--report", action="store_true", help="Generate report")
+    run_parser.add_argument(
+        "--workers",
+        type=int,
+        help="CPU worker count (0 or omit for auto)",
+    )
     run_parser.set_defaults(func=run_command)
 
     validate_parser = subparsers.add_parser("validate", help="Validate SOZ selection")
     validate_parser.add_argument("--project", required=True, help="Project JSON file")
     validate_parser.add_argument("--max-frames", type=int, default=200)
+    validate_parser.add_argument(
+        "--workers",
+        type=int,
+        help="CPU worker count (0 or omit for auto)",
+    )
     validate_parser.set_defaults(func=validate_command)
 
     extract_parser = subparsers.add_parser("extract", help="Extract frames by occupancy rule")
@@ -152,6 +194,11 @@ def main() -> None:
     extract_parser.add_argument("--format", default="xtc", help="Trajectory format (xtc)")
     extract_parser.add_argument("--prefix", default="extracted", help="Output filename prefix")
     extract_parser.add_argument("--output", help="Override output dir for logs")
+    extract_parser.add_argument(
+        "--workers",
+        type=int,
+        help="CPU worker count (0 or omit for auto)",
+    )
     extract_parser.set_defaults(func=extract_command)
 
     args = parser.parse_args()
