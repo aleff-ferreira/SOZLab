@@ -21,7 +21,6 @@ def _progress(current: int, total: int, message: str) -> None:
 
 
 def _strip_removed_analysis_options(project) -> None:
-    project.hbond_water_bridges.clear()
     project.hbond_hydration.clear()
     project.water_dynamics.clear()
 

@@ -88,8 +88,6 @@
     "write_parquet": false,
     "report_format": "md"
   },
-  "distance_bridges": [],
-  "hbond_water_bridges": [],
   "distance_solvent_contacts": [],
   "hbond_hydration": [],
   "density_maps": [],

@@ -20,12 +20,10 @@ CLI commands:
 ## Current exposed feature set
 UI and CLI currently expose:
 - SOZ occupancy analysis
-- distance bridges
 - density maps + density explorer (2D/3D)
 - export/report/extraction
 
 These analysis families are currently stripped on project load/run:
-- `hbond_water_bridges`
 - `hbond_hydration`
 - `water_dynamics`
 

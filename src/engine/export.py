@@ -68,41 +68,6 @@ def export_results(result: AnalysisResult, project: ProjectConfig) -> None:
                 project.outputs.write_parquet,
             )
 
-    for name, bridge_result in result.distance_bridge_results.items():
-        bridge_dir = os.path.join(output_dir, f"distance_bridge_{name}")
-        os.makedirs(bridge_dir, exist_ok=True)
-        _write_dataframe(
-            bridge_result.per_frame,
-            os.path.join(bridge_dir, "per_frame.csv"),
-            project.outputs.write_parquet,
-        )
-        _write_dataframe(
-            bridge_result.per_solvent,
-            os.path.join(bridge_dir, "per_solvent.csv"),
-            project.outputs.write_parquet,
-        )
-
-    for name, bridge_result in result.hbond_bridge_results.items():
-        bridge_dir = os.path.join(output_dir, f"hbond_water_bridge_{name}")
-        os.makedirs(bridge_dir, exist_ok=True)
-        _write_dataframe(
-            bridge_result.per_frame,
-            os.path.join(bridge_dir, "per_frame.csv"),
-            project.outputs.write_parquet,
-        )
-        _write_dataframe(
-            bridge_result.per_solvent,
-            os.path.join(bridge_dir, "per_solvent.csv"),
-            project.outputs.write_parquet,
-        )
-        if bridge_result.edge_list is not None and not bridge_result.edge_list.empty:
-            _write_dataframe(
-                bridge_result.edge_list,
-                os.path.join(bridge_dir, "edge_list.csv"),
-                project.outputs.write_parquet,
-            )
-
-
     for name, hydration_result in result.hbond_hydration_results.items():
         hydration_dir = os.path.join(output_dir, f"hbond_hydration_{name}")
         os.makedirs(hydration_dir, exist_ok=True)

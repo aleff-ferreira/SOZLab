@@ -8,18 +8,16 @@ Primary occupancy metrics are derived from these sets (`n_solvent`, entries, exi
 Current UI/CLI scope is intentionally narrower than historical internal modules.
 Exposed workflow includes:
 - SOZ occupancy analysis
-- distance bridges
 - density maps and density exploration
 - extraction/report/export
 
-H-bond bridge, H-bond hydration, and water-dynamics configs are currently stripped at runtime.
+H-bond hydration and water-dynamics configs are currently stripped at runtime.
 
 ## 3. UI simplification choices
 Recent UI decisions prioritize clarity and reduced control clutter:
 - Timeline uses fixed `n_solvent` as primary metric.
 - Histogram uses a single unified distribution (no visible zero/non-zero split panel).
 - Entry/Exit view keeps only mode + axis/sign controls.
-- Distance Bridge explorer keeps the three main plots with a single export action.
 - Density explorer keeps view/colormap/slice controls; no density-map dropdown in the top toolbar.
 
 ## 4. Plot context menu policy

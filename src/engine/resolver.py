@@ -206,19 +206,3 @@ def resolve_selection_from_label(
     if selection_label not in selections:
         raise KeyError(f"Selection label '{selection_label}' not found")
     return resolve_selection(universe, selections[selection_label])
-
-
-# Backwards-compatible aliases (kept for legacy calls/tests).
-ResolvedSeed = ResolvedSelection
-
-
-def resolve_seed(universe: mda.Universe, spec: SelectionSpec) -> ResolvedSelection:
-    return resolve_selection(universe, spec)
-
-
-def resolve_seed_from_label(
-    universe: mda.Universe,
-    seed_label: str,
-    seeds: dict[str, SelectionSpec],
-) -> ResolvedSelection:
-    return resolve_selection_from_label(universe, seed_label, seeds)

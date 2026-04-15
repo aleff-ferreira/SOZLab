@@ -13,6 +13,7 @@ from engine.models import (
     SOZNode,
     AnalysisOptions,
     OutputConfig,
+    DensityMapConfig,
 )
 from engine.preflight import run_preflight
 
@@ -119,3 +120,125 @@ def test_preflight_wildcard_resname_selection():
     report = run_preflight(project, u)
     assert report.ok
     assert report.selection_checks["selection_a"].count == 1
+
+
+def _make_two_selection_universe():
+    """Create a universe with 2 solvent residues and 2 distinct protein atoms."""
+    u = mda.Universe.empty(
+        n_atoms=8,
+        n_residues=4,
+        atom_resindex=[0, 0, 1, 1, 2, 2, 3, 3],
+        residue_segindex=[0, 0, 0, 0],
+        trajectory=True,
+    )
+    u.add_TopologyAttr("name", ["O", "H1", "O", "H1", "NZ", "CA", "NE2", "CB"])
+    u.add_TopologyAttr("resname", ["WAT", "WAT", "LYS", "HSD"])
+    u.add_TopologyAttr("resid", [1, 2, 3, 4])
+    u.add_TopologyAttr("segid", ["A"])
+    return u
+
+
+def test_preflight_density_species_no_solvent_warning():
+    """Density map selecting zero solvent atoms must produce a warning."""
+    u = _make_two_selection_universe()
+    sel = SelectionSpec(label="selection_a", selection="name NZ", require_unique=True)
+    root = SOZNode(
+        type="distance",
+        params={"selection_label": "selection_a", "cutoff": 3.5, "unit": "A"},
+    )
+    project = ProjectConfig(
+        inputs=InputConfig(topology="dummy"),
+        solvent=SolventConfig(
+            water_resnames=["WAT"],
+            water_oxygen_names=["O"],
+            probe=ProbeConfig(selection="name O", position="atom"),
+        ),
+        selections={"selection_a": sel},
+        sozs=[SOZDefinition(name="SOZ_1", description="", root=root)],
+        analysis=AnalysisOptions(),
+        outputs=OutputConfig(output_dir="results"),
+        density_maps=[
+            DensityMapConfig(
+                name="density_1",
+                species_selection="name NZ",  # Selects protein atom, not solvent
+                align=True,
+                align_selection="name CA",
+                conditioning_policy="strict",
+            )
+        ],
+    )
+    report = run_preflight(project, u)
+    assert any(
+        "none belong to solvent" in w.lower() or "solvent" in w.lower()
+        for w in report.warnings
+    )
+
+
+def test_preflight_density_species_solvent_no_warning():
+    """Density map selecting solvent atoms must NOT produce solvent mismatch warning."""
+    u = _make_two_selection_universe()
+    sel = SelectionSpec(label="selection_a", selection="name NZ", require_unique=True)
+    root = SOZNode(
+        type="distance",
+        params={"selection_label": "selection_a", "cutoff": 3.5, "unit": "A"},
+    )
+    project = ProjectConfig(
+        inputs=InputConfig(topology="dummy"),
+        solvent=SolventConfig(
+            water_resnames=["WAT"],
+            water_oxygen_names=["O"],
+            probe=ProbeConfig(selection="name O", position="atom"),
+        ),
+        selections={"selection_a": sel},
+        sozs=[SOZDefinition(name="SOZ_1", description="", root=root)],
+        analysis=AnalysisOptions(),
+        outputs=OutputConfig(output_dir="results"),
+        density_maps=[
+            DensityMapConfig(
+                name="density_1",
+                species_selection="name O",  # Selects solvent oxygen
+                align=True,
+                align_selection="name CA",
+                conditioning_policy="strict",
+            )
+        ],
+    )
+    report = run_preflight(project, u)
+    assert not any("none belong to solvent" in w.lower() for w in report.warnings)
+
+
+def test_preflight_density_strict_no_align_is_error():
+    u = _make_universe()
+    project = _make_project("name NZ")
+    project.density_maps = [
+        DensityMapConfig(
+            name="density_1",
+            species_selection="name O",
+            align=False,
+            conditioning_policy="strict",
+        )
+    ]
+
+    report = run_preflight(project, u)
+
+    assert not report.ok
+    assert any("scientifically unsafe" in err for err in report.errors)
+
+
+def test_preflight_density_warn_no_align_is_warning():
+    u = _make_universe()
+    project = _make_project("name NZ")
+    project.density_maps = [
+        DensityMapConfig(
+            name="density_1",
+            species_selection="name O",
+            align=False,
+            conditioning_policy="warn",
+        )
+    ]
+
+    report = run_preflight(project, u)
+
+    assert report.ok
+    assert any("scientifically unsafe" in warning for warning in report.warnings)
+    assert not any("scientifically unsafe" in err for err in report.errors)

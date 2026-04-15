@@ -87,7 +87,8 @@ class StatsAccumulator:
         for resindex in entries:
             self.entries_count[resindex] += 1
 
-        # Continuous segments
+        # Continuous residence: unbroken consecutive presence in the zone
+        # (Impey et al., J. Phys. Chem. 87, 1983).
         for resindex in list(self.current_cont.keys()):
             if resindex not in present:
                 start = self.current_cont.pop(resindex)
@@ -99,7 +100,8 @@ class StatsAccumulator:
             if resindex not in self.current_cont:
                 self.current_cont[resindex] = sample_index
 
-        # Intermittent segments
+        # Intermittent residence: allows transient absences up to
+        # gap_tolerance frames (Laage & Hynes, Science 311, 2006).
         for resindex in present:
             if resindex not in self.current_inter:
                 self.current_inter[resindex] = sample_index
@@ -237,21 +239,6 @@ def compute_residence_lengths(
         inter_lengths[resindex].append(end - start + 1)
 
     return ResidenceStats(continuous=cont_lengths, intermittent=inter_lengths)
-
-
-def compute_events(frame_sets: List[Set[int]]) -> Tuple[List[Set[int]], List[Set[int]]]:
-    entries_per_frame: List[Set[int]] = []
-    exits_per_frame: List[Set[int]] = []
-
-    prev_set: Set[int] = set()
-    for present in frame_sets:
-        entries = present - prev_set
-        exits = prev_set - present
-        entries_per_frame.append(entries)
-        exits_per_frame.append(exits)
-        prev_set = present
-
-    return entries_per_frame, exits_per_frame
 
 
 def compute_stats(

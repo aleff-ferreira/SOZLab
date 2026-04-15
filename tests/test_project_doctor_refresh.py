@@ -183,41 +183,6 @@ def test_add_soz_from_builder_skips_doctor_refresh_when_not_applied() -> None:
     window._refresh_project_doctor_if_initialized.assert_not_called()
 
 
-def test_distance_bridge_form_change_refreshes_doctor() -> None:
-    bridge = SimpleNamespace(
-        name="distance_bridge",
-        selection_a="",
-        selection_b="",
-        cutoff_a=3.5,
-        cutoff_b=3.5,
-        unit="A",
-        atom_mode="probe",
-    )
-    item = MagicMock()
-    window = SimpleNamespace(
-        _distance_bridge_form_updating=False,
-        state=SimpleNamespace(project=SimpleNamespace(distance_bridges=[bridge])),
-        distance_bridge_list=SimpleNamespace(currentRow=lambda: 0, item=lambda _idx: item),
-        distance_bridge_name_edit=SimpleNamespace(text=lambda: "distance_bridge"),
-        distance_bridge_cutoff_a_spin=SimpleNamespace(value=lambda: 3.5),
-        distance_bridge_cutoff_b_spin=SimpleNamespace(value=lambda: 3.5),
-        distance_bridge_unit_combo=SimpleNamespace(currentText=lambda: "A"),
-        distance_bridge_probe_combo=SimpleNamespace(currentText=lambda: "probe"),
-        _selection_combo_value=lambda combo: "SOZ_1_selection_a" if combo == "A" else "SOZ_1_selection_b",
-        distance_bridge_sel_a_combo="A",
-        distance_bridge_sel_b_combo="B",
-        _distance_bridge_item_text=lambda _bridge: "distance_bridge item",
-        _validate_distance_bridge_form=MagicMock(),
-        _refresh_project_doctor_if_initialized=MagicMock(),
-    )
-
-    MainWindow._on_distance_bridge_form_changed(window)
-
-    assert bridge.selection_a == "SOZ_1_selection_a"
-    assert bridge.selection_b == "SOZ_1_selection_b"
-    window._refresh_project_doctor_if_initialized.assert_called_once()
-
-
 def test_apply_wizard_selection_to_combo_forces_form_sync_and_doctor_refresh() -> None:
     signal = SimpleNamespace(emit=MagicMock())
     combo = SimpleNamespace(

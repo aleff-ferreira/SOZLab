@@ -93,7 +93,6 @@ Left drawer includes:
 
 Current tabs:
 - `Wizard`
-- `Distance Bridges`
 - `Density Maps`
 - `Selection Builder`
 - `Selection Tester`
@@ -101,14 +100,6 @@ Current tabs:
 
 ### Wizard
 Use this to define solvent behavior and SOZ logic from `Selection A` and optional `Selection B`.
-
-### Distance Bridges
-Configure bridge definitions with:
-- `Name`
-- `Selection A`, `Selection B`
-- `Cutoff A`, `Cutoff B`
-- `Unit`
-- `Mode`
 
 ### Density Maps
 Configure density analyses with:
@@ -136,7 +127,6 @@ Includes health badges, findings text, optional raw QC JSON, and log filtering t
 
 Mode toolbar:
 - `SOZ Explorer`
-- `Bridges`
 - `Density`
 
 ### 7.1 SOZ Explorer
@@ -182,19 +172,7 @@ Tables panel:
 - `Per Frame` / `Per Solvent`
 - text filter
 
-### 7.2 Bridges
-Current Bridges mode exposes Distance Bridge plotting only.
-Visible controls:
-- `Export Plot`
-
-Displayed plots:
-- `Distance Bridge`
-- `Residence Time Distribution`
-- `Top Bridging Residues`
-
-Stats strip shows `n=`, `mean=`, `max=`, `top3=`.
-
-### 7.3 Density
+### 7.2 Density
 Top controls:
 - `View` (`physical`, `relative`, `score`)
 - `Colormap`
@@ -232,7 +210,6 @@ Typical outputs in `outputs.output_dir`:
 - `soz_<name>/per_solvent.csv`
 - `soz_<name>/summary.json`
 - `soz_<name>/min_distance_traces.csv` (when available)
-- `distance_bridge_<name>/per_frame.csv` and `per_solvent.csv` (if configured)
 - `density_map_<name>/metadata.json` (if configured)
 - `report/report.md` (and `report/report.html` when format is `html`)
 - extraction artifacts (`*.xtc`, `_ref.pdb`, `_frames.csv`, `_params.json`)
