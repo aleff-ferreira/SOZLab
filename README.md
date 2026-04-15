@@ -4,7 +4,6 @@ SOZLab is a Linux GUI + CLI for solvent occupancy zone (SOZ) analysis of molecul
 
 Current public workflow focuses on:
 - SOZ occupancy analysis (`n_solvent`, entries/exits, residence summaries)
-- Distance bridge analysis
 - Density maps (2D slices + NGL-based 3D viewer)
 - CSV/JSON/report export and frame extraction
 
