@@ -35,7 +35,7 @@ def test_density_strict_no_align(mock_universe, analysis_options, caplog, tmp_pa
         )
     
     assert "test_strict" not in results
-    assert "scientfically unsafe" in caplog.text
+    assert "scientifically unsafe" in caplog.text
 
 def test_density_warn_no_align(mock_universe, analysis_options, caplog, tmp_path):
     """Test that warn policy runs but warns."""
@@ -54,7 +54,7 @@ def test_density_warn_no_align(mock_universe, analysis_options, caplog, tmp_path
     assert "test_warn" in results
     result = results["test_warn"]
     assert not result.metadata["is_scientifically_safe"]
-    assert any("scientfically unsafe" in w for w in result.metadata["analysis_warnings"])
+    assert any("scientifically unsafe" in w for w in result.metadata["analysis_warnings"])
 
 def test_density_unsafe_no_align(mock_universe, analysis_options, caplog, tmp_path):
     """Test that unsafe policy runs without warning."""

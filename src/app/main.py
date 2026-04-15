@@ -47,8 +47,6 @@ from engine.models import (
     SOZNode,
     ProbeConfig,
     SolventConfig,
-    DistanceBridgeConfig,
-    HbondWaterBridgeConfig,
     HbondHydrationConfig,
     DensityMapConfig,
     WaterDynamicsConfig,
@@ -60,7 +58,7 @@ from engine.logging_utils import setup_run_logger
 from engine.resolver import resolve_selection, sanitize_selection_string
 from engine.solvent import build_solvent
 from engine.soz_eval import EvaluationContext, evaluate_node
-from engine.units import to_nm
+from engine.units import to_nm, to_internal_length
 from engine.report import generate_report
 
 
@@ -282,6 +280,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._wizard_snapshot = self._wizard_state()
         except Exception:
             self._wizard_snapshot = None
+
+    def closeEvent(self, event) -> None:
+        # Ensure the analysis worker thread is stopped before the window is destroyed,
+        # preventing signal-to-deleted-slot crashes (Qt QThread lifecycle requirement).
+        if self.analysis_worker:
+            self.analysis_worker.cancel()
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            self.analysis_thread.quit()
+            self.analysis_thread.wait(5000)
+        super().closeEvent(event)
 
     def _apply_ui_style(self, scale: float = 1.0) -> None:
         compact = self._ui_density == "compact"
@@ -1111,68 +1119,6 @@ class MainWindow(QtWidgets.QMainWindow):
             error_text=tokens["error_text"],
         )
         self.setStyleSheet(style)
-
-    def _build_nav_rail(self) -> QtWidgets.QWidget:
-        rail = QtWidgets.QFrame()
-        rail.setObjectName("NavRail")
-        rail_layout = QtWidgets.QVBoxLayout(rail)
-        rail_layout.setContentsMargins(8, 8, 8, 8)
-        rail_layout.setSpacing(6)
-
-        self.nav_pin_btn = QtWidgets.QToolButton()
-        self.nav_pin_btn.setCheckable(True)
-        self.nav_pin_btn.setChecked(self._nav_rail_pinned)
-        self.nav_pin_btn.setToolTip("Pin navigation drawer")
-        self.nav_pin_btn.toggled.connect(self._toggle_nav_rail_pin)
-        rail_layout.addWidget(self.nav_pin_btn)
-
-        self.nav_step_group = QtWidgets.QButtonGroup(self)
-        self.nav_step_group.setExclusive(True)
-        self.nav_step_buttons = []
-        step_icons = [
-            QtWidgets.QStyle.StandardPixmap.SP_DirHomeIcon,
-            QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView,
-            QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton,
-            QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView,
-            QtWidgets.QStyle.StandardPixmap.SP_DriveFDIcon,
-        ]
-        for idx, (name, icon_enum) in enumerate(
-            zip(["Project", "Define", "QC", "Explore", "Export"], step_icons)
-        ):
-            btn = QtWidgets.QToolButton()
-            btn.setObjectName("RailStepButton")
-            btn.setCheckable(True)
-            btn.setText(name)
-            btn.setIcon(self.style().standardIcon(icon_enum))
-            btn.setToolTip(name)
-            btn.clicked.connect(lambda _=False, i=idx: self._set_active_step(i))
-            self.nav_step_group.addButton(btn, idx)
-            self.nav_step_buttons.append(btn)
-            rail_layout.addWidget(btn)
-
-        rail_layout.addStretch(1)
-
-        quick_row = QtWidgets.QHBoxLayout()
-        quick_row.setSpacing(4)
-        self.nav_load_btn = QtWidgets.QToolButton()
-        self.nav_load_btn.setObjectName("RailIconButton")
-        self.nav_load_btn.setIcon(
-            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton)
-        )
-        self.nav_load_btn.setToolTip("Load project")
-        self.nav_load_btn.clicked.connect(self._load_project)
-        quick_row.addWidget(self.nav_load_btn)
-
-        self.nav_run_btn = QtWidgets.QToolButton()
-        self.nav_run_btn.setObjectName("RailIconButton")
-        self.nav_run_btn.setIcon(
-            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay)
-        )
-        self.nav_run_btn.setToolTip("Run analysis")
-        self.nav_run_btn.clicked.connect(self._run_analysis)
-        quick_row.addWidget(self.nav_run_btn)
-        rail_layout.addLayout(quick_row)
-        return rail
 
     def _toggle_nav_rail_pin(self, enabled: bool) -> None:
         self._nav_rail_pinned = bool(enabled)
@@ -2221,24 +2167,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.main_split.setSizes([0, sizes[1] + sizes[0], sizes[2]])
                 self._update_splitter_constraints()
 
-    def _toggle_inspector(self, enabled: bool) -> None:
-        if hasattr(self, "inspector_scroll"):
-            self.inspector_scroll.setVisible(enabled)
-            if hasattr(self, "main_split"):
-                sizes = self.main_split.sizes()
-                if enabled:
-                    restored = int(getattr(self, "_last_inspector_size", 0) or 0)
-                    if restored <= 0:
-                        restored = int(240 * self._ui_scale)
-                    left_size = sizes[0] if len(sizes) > 0 else 0
-                    center_size = max(sum(sizes) - left_size - restored, 200)
-                    self.main_split.setSizes([left_size, center_size, restored])
-                else:
-                    if len(sizes) == 3:
-                        self._last_inspector_size = sizes[2]
-                        self.main_split.setSizes([sizes[0], sizes[1] + sizes[2], 0])
-                self._update_splitter_constraints()
-
     def _apply_initial_layout(self) -> None:
         if not hasattr(self, "main_split"):
             return
@@ -2274,21 +2202,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.page_stack.addWidget(self.page_qc)
         self.page_stack.addWidget(self.page_explore)
         self.page_stack.addWidget(self.page_export)
-
-    def _build_inspectors(self) -> None:
-        self.inspector_project = self._build_project_inspector()
-        self.inspector_define = self._build_define_inspector()
-        self.inspector_qc = self._build_qc_inspector()
-        self.inspector_explore = self._build_explore_inspector()
-        self.inspector_export = self._build_export_inspector()
-        for widget in (
-            self.inspector_project,
-            self.inspector_define,
-            self.inspector_qc,
-            self.inspector_explore,
-            self.inspector_export,
-        ):
-            self.inspector_stack.addWidget(widget)
 
     def _set_active_step(self, index: int) -> None:
         if index < 0 or index >= self.page_stack.count():
@@ -2452,14 +2365,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "event_plot"):
             self._style_plot(self.event_plot, "Occupancy Events")
         for attr, title in (
-            ("distance_bridge_timeseries_plot", "Distance Bridge"),
-            ("distance_bridge_residence_plot", "Residence summary"),
-            ("distance_bridge_top_plot", "Top bridges"),
-            ("hbond_bridge_timeseries_plot", "H-bond Water Bridge"),
-            ("hbond_bridge_residence_plot", "Residence summary"),
-            ("hbond_bridge_top_plot", "Top bridges"),
-            ("bridge_compare_plot", "Bridge type comparator"),
-            ("hbond_bridge_network_plot", "Bridge network"),
             ("hydration_frequency_plot", "Residue frequency profile"),
             ("hydration_top_plot", "Top residues"),
             ("hydration_timeline_plot", "Residue contact timeline"),
@@ -2495,8 +2400,6 @@ class MainWindow(QtWidgets.QMainWindow):
         for table_attr in (
             "doctor_seed_table",
             "seed_validation_table",
-            "distance_bridge_table",
-            "hbond_bridge_table",
             "distance_contact_table",
             "hbond_hydration_table",
             "density_table",
@@ -3588,7 +3491,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         explore_modes = [
             "SOZ Explorer",
-            "Bridges",
             "Density",
         ]
         (
@@ -3603,7 +3505,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.explore_tabs = QtWidgets.QStackedWidget()
         self.explore_tabs.addWidget(self._build_soz_explore_tab())
-        self.explore_tabs.addWidget(self._build_bridge_explore_tab())
         self.explore_tabs.addWidget(self._build_density_explore_tab())
         self.explore_mode_group.idClicked.connect(self.explore_tabs.setCurrentIndex)
         self.explore_tabs.currentChanged.connect(
@@ -3665,211 +3566,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_feature_toolbar_index(self.soz_explore_buttons, 0)
 
         layout.addWidget(self.soz_explore_stack, 1)
-        return panel
-
-    def _build_bridge_explore_tab(self) -> QtWidgets.QWidget:
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-        layout.addWidget(self._build_distance_bridge_explore_panel(), 1)
-        return panel
-
-    def _build_distance_bridge_explore_panel(self) -> QtWidgets.QWidget:
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-        controls = QtWidgets.QHBoxLayout()
-        self.distance_bridge_combo = QtWidgets.QComboBox()
-        self.distance_bridge_combo.currentTextChanged.connect(self._update_distance_bridge_plots)
-        self.distance_bridge_smooth_check = QtWidgets.QCheckBox("Smooth")
-        self.distance_bridge_smooth_check.toggled.connect(self._update_distance_bridge_plots)
-        self.distance_bridge_smooth_window = QtWidgets.QSpinBox()
-        self.distance_bridge_smooth_window.setRange(1, 500)
-        self.distance_bridge_smooth_window.setValue(5)
-        self.distance_bridge_smooth_window.valueChanged.connect(self._update_distance_bridge_plots)
-        self.distance_bridge_export_combo = QtWidgets.QComboBox()
-        self.distance_bridge_export_combo.addItems(["Time series", "Residence", "Top bridges"])
-        self.distance_bridge_export_btn = QtWidgets.QPushButton("Export Plot")
-        self.distance_bridge_export_btn.clicked.connect(self._export_distance_bridge_plot)
-        controls.addStretch(1)
-        controls.addWidget(self.distance_bridge_export_btn)
-        layout.addLayout(controls)
-        layout.addWidget(self._build_insight_strip("bridge_distance"), 0)
-
-        self.distance_bridge_timeseries_plot = pg.PlotWidget()
-        self._style_plot(self.distance_bridge_timeseries_plot, "Distance Bridge")
-        self.distance_bridge_timeseries_plot.setLabel("bottom", "Time", units="ns")
-        self.distance_bridge_timeseries_plot.setLabel("left", "Bridging solvent residues")
-        self.distance_bridge_timeseries_plot.setToolTip(
-            "Distance Bridge (distance-cutoff intersection): number of bridging solvent residues per frame."
-        )
-
-        bottom_row = QtWidgets.QHBoxLayout()
-        self.distance_bridge_residence_plot = pg.PlotWidget()
-        self._style_plot(
-            self.distance_bridge_residence_plot,
-            "Distance Bridge (distance-cutoff intersection): Residence",
-        )
-        self.distance_bridge_residence_plot.setLabel("bottom", "Residence (time)")
-        self.distance_bridge_residence_plot.setLabel("left", "Survival")
-        self.distance_bridge_residence_plot.setToolTip(
-            "Distance Bridge (distance-cutoff intersection): residence survival (continuous segments)."
-        )
-        self.distance_bridge_top_plot = pg.PlotWidget()
-        self._style_plot(
-            self.distance_bridge_top_plot,
-            "Distance Bridge (distance-cutoff intersection): Top bridges",
-        )
-        self.distance_bridge_top_plot.setLabel("bottom", "Occupancy %")
-        self.distance_bridge_top_plot.setLabel("left", "Bridge ID")
-        self.distance_bridge_top_plot.setToolTip(
-            "Distance Bridge (distance-cutoff intersection): top bridging solvent residues by occupancy."
-        )
-        bottom_row.addWidget(self.distance_bridge_residence_plot, 1)
-        bottom_row.addWidget(self.distance_bridge_top_plot, 1)
-
-        layout.addWidget(self.distance_bridge_timeseries_plot, 2)
-        layout.addLayout(bottom_row, 1)
-        return panel
-
-    def _build_hbond_bridge_explore_panel(self) -> QtWidgets.QWidget:
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-        controls = QtWidgets.QHBoxLayout()
-        controls.addWidget(QtWidgets.QLabel("H-bond Water Bridge"))
-        self.hbond_bridge_combo = QtWidgets.QComboBox()
-        self.hbond_bridge_combo.currentTextChanged.connect(self._update_hbond_bridge_plots)
-        self.hbond_bridge_smooth_check = QtWidgets.QCheckBox("Smooth")
-        self.hbond_bridge_smooth_check.toggled.connect(self._update_hbond_bridge_plots)
-        self.hbond_bridge_smooth_window = QtWidgets.QSpinBox()
-        self.hbond_bridge_smooth_window.setRange(1, 500)
-        self.hbond_bridge_smooth_window.setValue(5)
-        self.hbond_bridge_smooth_window.valueChanged.connect(self._update_hbond_bridge_plots)
-        controls.addWidget(self.hbond_bridge_combo)
-        controls.addWidget(self.hbond_bridge_smooth_check)
-        controls.addWidget(QtWidgets.QLabel("Window"))
-        controls.addWidget(self.hbond_bridge_smooth_window)
-        self.hbond_bridge_export_combo = QtWidgets.QComboBox()
-        self.hbond_bridge_export_combo.addItems(
-            ["Time series", "Residence", "Top bridges", "Comparator", "Network"]
-        )
-        self.hbond_bridge_export_btn = QtWidgets.QPushButton("Export Plot")
-        self.hbond_bridge_export_btn.clicked.connect(self._export_hbond_bridge_plot)
-        controls.addWidget(self.hbond_bridge_export_combo)
-        controls.addWidget(self.hbond_bridge_export_btn)
-        controls.addStretch(1)
-        layout.addLayout(controls)
-
-        self.hbond_bridge_timeseries_plot = pg.PlotWidget()
-        self._style_plot(self.hbond_bridge_timeseries_plot, "H-bond Water Bridge")
-        self.hbond_bridge_timeseries_plot.setLabel("bottom", "Time", units="ns")
-        self.hbond_bridge_timeseries_plot.setLabel("left", "# bridging waters")
-        self.hbond_bridge_timeseries_plot.setToolTip(
-            "H-bond Water Bridge: number of bridging waters per frame (MDAnalysis WaterBridgeAnalysis definition)."
-        )
-
-        self.bridge_compare_plot = pg.PlotWidget()
-        self._style_plot(self.bridge_compare_plot, "Distance vs H-bond Bridge")
-        self.bridge_compare_plot.setLabel("bottom", "Time", units="ns")
-        self.bridge_compare_plot.setLabel("left", "# bridging waters")
-        self.bridge_compare_plot.setToolTip(
-            "Comparator: Distance Bridge vs H-bond Water Bridge time series."
-        )
-
-        # [Audit Fix] Add checkbox to toggle comparator overlay
-        self.bridge_compare_check = QtWidgets.QCheckBox("Show Comparator")
-        self.bridge_compare_check.setToolTip(
-            "Overlay Distance Bridge time series onto H-bond Bridge plot for comparison."
-        )
-        self.bridge_compare_check.setChecked(False)  # Default off to prevent confusion
-        self.bridge_compare_check.toggled.connect(self._update_hbond_bridge_plots)
-        
-        # Insert check into controls
-        controls.insertWidget(controls.count() - 2, self.bridge_compare_check)
-        layout.addWidget(self._build_insight_strip("bridge_hbond"), 0)
-
-        bottom_row = QtWidgets.QHBoxLayout()
-        self.hbond_bridge_residence_plot = pg.PlotWidget()
-        self._style_plot(self.hbond_bridge_residence_plot, "H-bond Water Bridge: Residence")
-        self.hbond_bridge_residence_plot.setLabel("bottom", "Residence (time)")
-        self.hbond_bridge_residence_plot.setLabel("left", "Survival")
-        self.hbond_bridge_residence_plot.setToolTip(
-            "H-bond Water Bridge: residence survival (continuous segments)."
-        )
-        self.hbond_bridge_top_plot = pg.PlotWidget()
-        self._style_plot(self.hbond_bridge_top_plot, "H-bond Water Bridge: Top bridges")
-        self.hbond_bridge_top_plot.setLabel("bottom", "Occupancy %")
-        self.hbond_bridge_top_plot.setLabel("left", "Bridge ID")
-        self.hbond_bridge_top_plot.setToolTip(
-            "H-bond Water Bridge: top bridging waters by occupancy."
-        )
-        bottom_row.addWidget(self.hbond_bridge_residence_plot, 1)
-        bottom_row.addWidget(self.hbond_bridge_top_plot, 1)
-
-        self.hbond_bridge_network_plot = pg.PlotWidget()
-        self._style_plot(self.hbond_bridge_network_plot, "H-bond Water Bridge: Network")
-        self.hbond_bridge_network_plot.setLabel("bottom", "Network")
-        self.hbond_bridge_network_plot.setLabel("left", "")
-        self.hbond_bridge_network_plot.setToolTip(
-            "Optional network view: partner ↔ water ↔ partner edges for top bridges."
-        )
-
-        layout.addWidget(self.hbond_bridge_timeseries_plot, 2)
-        layout.addWidget(self.bridge_compare_plot, 1)
-        layout.addLayout(bottom_row, 1)
-        layout.addWidget(self.hbond_bridge_network_plot, 1)
-        return panel
-
-    def _build_hbond_hydration_explore_tab(self) -> QtWidgets.QWidget:
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-        controls = QtWidgets.QHBoxLayout()
-        controls.addWidget(QtWidgets.QLabel("H-bond Hydration"))
-        self.hydration_config_combo = QtWidgets.QComboBox()
-        self.hydration_config_combo.currentTextChanged.connect(self._update_hydration_plots)
-        controls.addWidget(self.hydration_config_combo)
-        controls.addWidget(QtWidgets.QLabel("Metric"))
-        self.hydration_metric_combo = QtWidgets.QComboBox()
-        self.hydration_metric_combo.addItems(["freq_total", "freq_given_soz"])
-        self.hydration_metric_combo.currentTextChanged.connect(self._update_hydration_plots)
-        controls.addWidget(self.hydration_metric_combo)
-        self.hydration_export_combo = QtWidgets.QComboBox()
-        self.hydration_export_combo.addItems(["Frequency", "Top residues", "Timeline"])
-        self.hydration_export_btn = QtWidgets.QPushButton("Export Plot")
-        self.hydration_export_btn.clicked.connect(self._export_hydration_plot)
-        controls.addWidget(self.hydration_export_combo)
-        controls.addWidget(self.hydration_export_btn)
-        
-        controls.addWidget(QtWidgets.QLabel("Colormap"))
-        self.hydration_cmap_combo = QtWidgets.QComboBox()
-        self.hydration_cmap_combo.addItems(["viridis", "magma", "plasma", "inferno", "cividis", "hot", "cool", "GnuPlot", "HLS"])
-        self.hydration_cmap_combo.setCurrentText("viridis")
-        self.hydration_cmap_combo.currentTextChanged.connect(self._update_hydration_plots)
-        controls.addWidget(self.hydration_cmap_combo)
-
-        controls.addStretch(1)
-        layout.addLayout(controls)
-        layout.addWidget(self._build_insight_strip("hydration"), 0)
-
-        self.hydration_frequency_plot = pg.PlotWidget()
-        self._style_plot(self.hydration_frequency_plot, "Residue frequency profile")
-        self.hydration_frequency_plot.setLabel("bottom", "Residue ID")
-        self.hydration_frequency_plot.setLabel("left", "Frequency")
-        self.hydration_scatter = pg.ScatterPlotItem()
-        self.hydration_frequency_plot.addItem(self.hydration_scatter)
-        self.hydration_scatter.sigClicked.connect(self._on_hydration_point_clicked)
-
-        self.hydration_top_plot = pg.PlotWidget()
-        self._style_plot(self.hydration_top_plot, "Top residues")
-        self.hydration_top_plot.setLabel("bottom", "Frequency")
-        self.hydration_top_plot.setLabel("left", "Residue")
-
-        self.hydration_timeline_plot = pg.PlotWidget()
-        self._style_plot(self.hydration_timeline_plot, "Residue contact timeline")
-        self.hydration_timeline_plot.setLabel("bottom", "Time", units="ns")
-        self.hydration_timeline_plot.setLabel("left", "Contact")
-
-        layout.addWidget(self.hydration_frequency_plot, 2)
-        layout.addWidget(self.hydration_top_plot, 1)
-        layout.addWidget(self.hydration_timeline_plot, 1)
         return panel
 
     def _build_density_explore_tab(self) -> QtWidgets.QWidget:
@@ -4029,55 +3725,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.density_layout.addItem(self.density_hist, row=0, col=2, rowspan=2)
         return panel
 
-    def _build_water_dynamics_explore_tab(self) -> QtWidgets.QWidget:
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-        controls = QtWidgets.QHBoxLayout()
-        controls.addWidget(QtWidgets.QLabel("Water dynamics"))
-        self.water_dynamics_combo = QtWidgets.QComboBox()
-        self.water_dynamics_combo.currentTextChanged.connect(self._update_water_dynamics_plots)
-        self.water_dynamics_log_check = QtWidgets.QCheckBox("Log τ")
-        self.water_dynamics_log_check.toggled.connect(self._update_water_dynamics_plots)
-        controls.addWidget(self.water_dynamics_combo)
-        controls.addWidget(self.water_dynamics_log_check)
-        self.water_dynamics_export_combo = QtWidgets.QComboBox()
-        self.water_dynamics_export_combo.addItems(["SP(τ)", "HBL", "WOR"])
-        self.water_dynamics_export_btn = QtWidgets.QPushButton("Export Plot")
-        self.water_dynamics_export_btn.clicked.connect(self._export_water_dynamics_plot)
-        controls.addWidget(self.water_dynamics_export_combo)
-        controls.addWidget(self.water_dynamics_export_btn)
-        controls.addStretch(1)
-        layout.addLayout(controls)
-        layout.addWidget(self._build_insight_strip("water"), 0)
-
-        self.water_sp_plot = pg.PlotWidget()
-        self._style_plot(self.water_sp_plot, "SP(τ)")
-        self.water_sp_plot.setLabel("bottom", "Tau")
-        self.water_sp_plot.setLabel("left", "Survival")
-        self.water_hbl_plot = pg.PlotWidget()
-        self._style_plot(self.water_hbl_plot, "H-bond lifetime")
-        self.water_hbl_plot.setLabel("bottom", "Tau")
-        self.water_hbl_plot.setLabel("left", "Correlation")
-        self.water_wor_plot = pg.PlotWidget()
-        self._style_plot(self.water_wor_plot, "Water orientational relaxation")
-        self.water_wor_plot.setLabel("bottom", "Tau")
-        self.water_wor_plot.setLabel("left", "Correlation")
-        self.water_dynamics_note = QtWidgets.QLabel("")
-        self.water_dynamics_note.setWordWrap(True)
-        self.water_dynamics_summary = QtWidgets.QTableWidget()
-        self.water_dynamics_summary.setColumnCount(5)
-        self._configure_table_headers(
-            self.water_dynamics_summary,
-            ["resindex", "resid", "resname", "segid", "mean_lifetime"],
-        )
-
-        layout.addWidget(self.water_sp_plot, 1)
-        layout.addWidget(self.water_hbl_plot, 1)
-        layout.addWidget(self.water_wor_plot, 1)
-        layout.addWidget(self.water_dynamics_note)
-        layout.addWidget(self.water_dynamics_summary)
-        return panel
-
     def _build_export_page(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
@@ -4162,18 +3809,6 @@ class MainWindow(QtWidgets.QMainWindow):
         g_layout.addWidget(self.export_inspector_text)
         layout.addWidget(group)
         return panel
-
-    def _build_center_tabs(self) -> QtWidgets.QTabWidget:
-        tabs = QtWidgets.QTabWidget()
-        tabs.addTab(self._build_overview_tab(), "Overview")
-        tabs.addTab(self._build_qc_tab(), "QC Summary")
-        tabs.addTab(self._build_timeline_tab(), "Timeline")
-        tabs.addTab(self._build_plots_tab(), "Plots")
-        tabs.addTab(self._build_tables_tab(), "Tables")
-        tabs.addTab(self._build_report_tab(), "Report")
-        tabs.addTab(self._build_logs_tab(), "Logs")
-        tabs.addTab(self._build_extract_tab(), "Extract")
-        return tabs
 
     def _build_overview_tab(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
@@ -4858,7 +4493,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(panel)
         builder_pages = [
             ("Wizard", self._build_wizard_tab()),
-            ("Distance Bridges", self._build_bridges_tab()),
+
             ("Density Maps", self._build_density_tab()),
             ("Selection Builder", self._build_selection_builder_tab()),
             ("Selection Tester", self._build_selection_tester_tab()),
@@ -5101,393 +4736,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_selection_builder_output()
         return panel
 
-    def _build_bridges_tab(self) -> QtWidgets.QWidget:
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-
-        intro = QtWidgets.QLabel(
-            "Distance bridges identify solvent residues that sit within two distance cutoffs at the same time "
-            "(selection A AND selection B). Use this to track shared waters between two sites.\n"
-            "Explore: Bridges tab shows the time series, residence survival, and top bridge list."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-
-        body = QtWidgets.QHBoxLayout()
-
-        list_panel = QtWidgets.QWidget()
-        list_layout = QtWidgets.QVBoxLayout(list_panel)
-        list_layout.addWidget(QtWidgets.QLabel("Configured bridges"))
-        self.distance_bridge_list = QtWidgets.QListWidget()
-        self.distance_bridge_list.currentRowChanged.connect(self._on_distance_bridge_selected)
-        list_layout.addWidget(self.distance_bridge_list, 1)
-        list_buttons = QtWidgets.QHBoxLayout()
-        add_btn = QtWidgets.QPushButton("Add")
-        dup_btn = QtWidgets.QPushButton("Duplicate")
-        remove_btn = QtWidgets.QPushButton("Remove")
-        add_btn.clicked.connect(self._add_distance_bridge_row)
-        dup_btn.clicked.connect(self._duplicate_distance_bridge_row)
-        remove_btn.clicked.connect(self._remove_distance_bridge_row)
-        list_buttons.addWidget(add_btn)
-        list_buttons.addWidget(dup_btn)
-        list_buttons.addWidget(remove_btn)
-        list_buttons.addStretch(1)
-        list_layout.addLayout(list_buttons)
-        body.addWidget(list_panel, 1)
-
-        self.distance_bridge_detail_scroll = QtWidgets.QScrollArea()
-        self.distance_bridge_detail_scroll.setWidgetResizable(True)
-        detail_panel = QtWidgets.QWidget()
-        detail_layout = QtWidgets.QVBoxLayout(detail_panel)
-
-        details_group = QtWidgets.QGroupBox("Bridge details")
-        form = QtWidgets.QFormLayout(details_group)
-
-        self.distance_bridge_name_edit = QtWidgets.QLineEdit()
-        self.distance_bridge_name_edit.setPlaceholderText("e.g., active_site_bridge")
-        form.addRow("Name", self.distance_bridge_name_edit)
-
-        self.distance_bridge_sel_a_combo = QtWidgets.QComboBox()
-        self._register_selection_combo(self.distance_bridge_sel_a_combo)
-        sel_a_row = self._build_selection_row(self.distance_bridge_sel_a_combo)
-        form.addRow("Selection A", sel_a_row)
-
-        self.distance_bridge_sel_b_combo = QtWidgets.QComboBox()
-        self._register_selection_combo(self.distance_bridge_sel_b_combo)
-        sel_b_row = self._build_selection_row(self.distance_bridge_sel_b_combo)
-        form.addRow("Selection B", sel_b_row)
-
-        self.distance_bridge_cutoff_a_spin = QtWidgets.QDoubleSpinBox()
-        self.distance_bridge_cutoff_a_spin.setRange(0.0, 100.0)
-        self.distance_bridge_cutoff_a_spin.setDecimals(3)
-        self.distance_bridge_cutoff_a_spin.setSingleStep(0.1)
-        form.addRow("Cutoff A", self.distance_bridge_cutoff_a_spin)
-
-        self.distance_bridge_cutoff_b_spin = QtWidgets.QDoubleSpinBox()
-        self.distance_bridge_cutoff_b_spin.setRange(0.0, 100.0)
-        self.distance_bridge_cutoff_b_spin.setDecimals(3)
-        self.distance_bridge_cutoff_b_spin.setSingleStep(0.1)
-        form.addRow("Cutoff B", self.distance_bridge_cutoff_b_spin)
-
-        self.distance_bridge_unit_combo = QtWidgets.QComboBox()
-        self.distance_bridge_unit_combo.addItems(["A", "nm"])
-        form.addRow("Unit", self.distance_bridge_unit_combo)
-
-        self.distance_bridge_probe_combo = QtWidgets.QComboBox()
-        self.distance_bridge_probe_combo.addItems(["probe", "atom", "com", "cog", "all"])
-        self.distance_bridge_probe_combo.setToolTip(
-            "Which solvent positions to use. 'probe' uses the global probe settings."
-        )
-        form.addRow("Mode", self.distance_bridge_probe_combo)
-
-        detail_layout.addWidget(details_group)
-
-        self.distance_bridge_warning = QtWidgets.QLabel("")
-        self.distance_bridge_warning.setWordWrap(True)
-        detail_layout.addWidget(self.distance_bridge_warning)
-        detail_layout.addStretch(1)
-
-        self.distance_bridge_detail_scroll.setWidget(detail_panel)
-        body.addWidget(self.distance_bridge_detail_scroll, 2)
-
-        layout.addLayout(body)
-
-        for widget in (
-            self.distance_bridge_name_edit,
-            self.distance_bridge_sel_a_combo,
-            self.distance_bridge_sel_b_combo,
-            self.distance_bridge_unit_combo,
-            self.distance_bridge_probe_combo,
-        ):
-            if isinstance(widget, QtWidgets.QComboBox):
-                widget.currentTextChanged.connect(self._on_distance_bridge_form_changed)
-            else:
-                widget.textChanged.connect(self._on_distance_bridge_form_changed)
-        self.distance_bridge_cutoff_a_spin.valueChanged.connect(self._on_distance_bridge_form_changed)
-        self.distance_bridge_cutoff_b_spin.valueChanged.connect(self._on_distance_bridge_form_changed)
-
-        return panel
-
-    def _build_hbond_bridges_tab(self) -> QtWidgets.QWidget:
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-
-        intro = QtWidgets.QLabel(
-            "H-bond water bridges identify solvent waters that hydrogen-bond to both selections "
-            "within distance/angle thresholds. This captures bridging water networks.\n"
-            "Explore: Bridges tab shows time series, residence, top bridges, comparator, and network view."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-
-        body = QtWidgets.QHBoxLayout()
-
-        list_panel = QtWidgets.QWidget()
-        list_layout = QtWidgets.QVBoxLayout(list_panel)
-        list_layout.addWidget(QtWidgets.QLabel("Configured H-bond bridges"))
-        self.hbond_bridge_list = QtWidgets.QListWidget()
-        self.hbond_bridge_list.currentRowChanged.connect(self._on_hbond_bridge_selected)
-        list_layout.addWidget(self.hbond_bridge_list, 1)
-        list_buttons = QtWidgets.QHBoxLayout()
-        add_btn = QtWidgets.QPushButton("Add")
-        dup_btn = QtWidgets.QPushButton("Duplicate")
-        remove_btn = QtWidgets.QPushButton("Remove")
-        add_btn.clicked.connect(self._add_hbond_bridge_row)
-        dup_btn.clicked.connect(self._duplicate_hbond_bridge_row)
-        remove_btn.clicked.connect(self._remove_hbond_bridge_row)
-        list_buttons.addWidget(add_btn)
-        list_buttons.addWidget(dup_btn)
-        list_buttons.addWidget(remove_btn)
-        list_buttons.addStretch(1)
-        list_layout.addLayout(list_buttons)
-        body.addWidget(list_panel, 1)
-
-        self.hbond_bridge_detail_scroll = QtWidgets.QScrollArea()
-        self.hbond_bridge_detail_scroll.setWidgetResizable(True)
-        detail_panel = QtWidgets.QWidget()
-        detail_layout = QtWidgets.QVBoxLayout(detail_panel)
-
-        details_group = QtWidgets.QGroupBox("Bridge details")
-        form = QtWidgets.QFormLayout(details_group)
-
-        self.hbond_bridge_name_edit = QtWidgets.QLineEdit()
-        self.hbond_bridge_name_edit.setPlaceholderText("e.g., catalytic_bridge")
-        form.addRow("Name", self.hbond_bridge_name_edit)
-
-        self.hbond_bridge_sel_a_combo = QtWidgets.QComboBox()
-        self._register_selection_combo(self.hbond_bridge_sel_a_combo)
-        sel_a_row = self._build_selection_row(self.hbond_bridge_sel_a_combo, allow_raw=True)
-        form.addRow("Selection A", sel_a_row)
-
-        self.hbond_bridge_sel_b_combo = QtWidgets.QComboBox()
-        self._register_selection_combo(self.hbond_bridge_sel_b_combo)
-        sel_b_row = self._build_selection_row(self.hbond_bridge_sel_b_combo, allow_raw=True)
-        form.addRow("Selection B", sel_b_row)
-
-        self.hbond_bridge_distance_spin = QtWidgets.QDoubleSpinBox()
-        self.hbond_bridge_distance_spin.setRange(0.0, 10.0)
-        self.hbond_bridge_distance_spin.setDecimals(3)
-        self.hbond_bridge_distance_spin.setSingleStep(0.1)
-        form.addRow("Distance cutoff (A)", self.hbond_bridge_distance_spin)
-
-        self.hbond_bridge_angle_spin = QtWidgets.QDoubleSpinBox()
-        self.hbond_bridge_angle_spin.setRange(0.0, 180.0)
-        self.hbond_bridge_angle_spin.setDecimals(1)
-        self.hbond_bridge_angle_spin.setSingleStep(1.0)
-        form.addRow("Angle cutoff (deg)", self.hbond_bridge_angle_spin)
-
-        self.hbond_bridge_backend_combo = QtWidgets.QComboBox()
-        self.hbond_bridge_backend_combo.addItems(["auto", "waterbridge", "hbond_analysis"])
-        self.hbond_bridge_backend_combo.setToolTip(
-            "auto: Try WaterBridgeAnalysis, fallback to HBA.\n"
-            "waterbridge: Force WaterBridgeAnalysis (error if missing).\n"
-            "hbond_analysis: Force HBA (fallback)."
-        )
-        form.addRow("Backend", self.hbond_bridge_backend_combo)
-
-        detail_layout.addWidget(details_group)
-
-        self.hbond_bridge_advanced_toggle = QtWidgets.QCheckBox("<> Advanced")
-        self.hbond_bridge_advanced_toggle.toggled.connect(self._toggle_hbond_bridge_advanced)
-        detail_layout.addWidget(self.hbond_bridge_advanced_toggle)
-
-        self.hbond_bridge_advanced_group = QtWidgets.QGroupBox("Advanced selection overrides (optional)")
-        advanced_form = QtWidgets.QFormLayout(self.hbond_bridge_advanced_group)
-        self.hbond_bridge_water_edit = QtWidgets.QLineEdit()
-        self.hbond_bridge_water_edit.setPlaceholderText("Defaults to solvent water selection")
-        advanced_form.addRow(
-            "Water selection",
-            self._build_selection_input_row(self.hbond_bridge_water_edit, include_saved=True),
-        )
-        self.hbond_bridge_donors_edit = QtWidgets.QLineEdit()
-        advanced_form.addRow(
-            "Donors selection",
-            self._build_selection_input_row(self.hbond_bridge_donors_edit, include_saved=True),
-        )
-        self.hbond_bridge_hydrogens_edit = QtWidgets.QLineEdit()
-        advanced_form.addRow(
-            "Hydrogens selection",
-            self._build_selection_input_row(self.hbond_bridge_hydrogens_edit, include_saved=True),
-        )
-        self.hbond_bridge_acceptors_edit = QtWidgets.QLineEdit()
-        advanced_form.addRow(
-            "Acceptors selection",
-            self._build_selection_input_row(self.hbond_bridge_acceptors_edit, include_saved=True),
-        )
-        self.hbond_bridge_update_check = QtWidgets.QCheckBox("Update selections each frame")
-        self.hbond_bridge_update_check.setChecked(True)
-        advanced_form.addRow("", self.hbond_bridge_update_check)
-        self.hbond_bridge_advanced_group.setVisible(False)
-        detail_layout.addWidget(self.hbond_bridge_advanced_group)
-
-        self.hbond_bridge_warning = QtWidgets.QLabel("")
-        self.hbond_bridge_warning.setWordWrap(True)
-        detail_layout.addWidget(self.hbond_bridge_warning)
-        detail_layout.addStretch(1)
-
-        self.hbond_bridge_detail_scroll.setWidget(detail_panel)
-        body.addWidget(self.hbond_bridge_detail_scroll, 2)
-        layout.addLayout(body)
-
-        for widget in (
-            self.hbond_bridge_name_edit,
-            self.hbond_bridge_sel_a_combo,
-            self.hbond_bridge_sel_b_combo,
-            self.hbond_bridge_water_edit,
-            self.hbond_bridge_donors_edit,
-            self.hbond_bridge_hydrogens_edit,
-            self.hbond_bridge_acceptors_edit,
-        ):
-            if isinstance(widget, QtWidgets.QComboBox):
-                widget.currentTextChanged.connect(self._on_hbond_bridge_form_changed)
-            else:
-                widget.textChanged.connect(self._on_hbond_bridge_form_changed)
-        self.hbond_bridge_distance_spin.valueChanged.connect(self._on_hbond_bridge_form_changed)
-        self.hbond_bridge_angle_spin.valueChanged.connect(self._on_hbond_bridge_form_changed)
-        self.hbond_bridge_update_check.toggled.connect(self._on_hbond_bridge_form_changed)
-
-        return panel
-
-
-    def _build_hbond_hydration_tab(self) -> QtWidgets.QWidget:
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-
-        intro = QtWidgets.QLabel(
-            "H-bond hydration measures hydrogen bonds between solvent and a residue selection. "
-            "You can condition counts on SOZ membership or compute across all frames.\n"
-            "Explore: Hydration tab shows residue frequency, top contacts, and timeline."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-
-        body = QtWidgets.QHBoxLayout()
-
-        list_panel = QtWidgets.QWidget()
-        list_layout = QtWidgets.QVBoxLayout(list_panel)
-        list_layout.addWidget(QtWidgets.QLabel("Configured H-bond hydration"))
-        self.hbond_hydration_list = QtWidgets.QListWidget()
-        self.hbond_hydration_list.currentRowChanged.connect(self._on_hbond_hydration_selected)
-        list_layout.addWidget(self.hbond_hydration_list, 1)
-        list_buttons = QtWidgets.QHBoxLayout()
-        add_btn = QtWidgets.QPushButton("Add")
-        dup_btn = QtWidgets.QPushButton("Duplicate")
-        remove_btn = QtWidgets.QPushButton("Remove")
-        add_btn.clicked.connect(self._add_hbond_hydration_row)
-        dup_btn.clicked.connect(self._duplicate_hbond_hydration_row)
-        remove_btn.clicked.connect(self._remove_hbond_hydration_row)
-        list_buttons.addWidget(add_btn)
-        list_buttons.addWidget(dup_btn)
-        list_buttons.addWidget(remove_btn)
-        list_buttons.addStretch(1)
-        list_layout.addLayout(list_buttons)
-        body.addWidget(list_panel, 1)
-
-        self.hbond_hydration_detail_scroll = QtWidgets.QScrollArea()
-        self.hbond_hydration_detail_scroll.setWidgetResizable(True)
-        detail_panel = QtWidgets.QWidget()
-        detail_layout = QtWidgets.QVBoxLayout(detail_panel)
-
-        details_group = QtWidgets.QGroupBox("Hydration details")
-        form = QtWidgets.QFormLayout(details_group)
-
-        self.hbond_hydration_name_edit = QtWidgets.QLineEdit()
-        self.hbond_hydration_name_edit.setPlaceholderText("e.g., hbond_hydration")
-        form.addRow("Name", self.hbond_hydration_name_edit)
-
-        self.hbond_hydration_residue_edit = QtWidgets.QLineEdit()
-        self.hbond_hydration_residue_edit.setPlaceholderText("e.g., protein or resname LIG")
-        form.addRow(
-            "Residue selection",
-            self._build_selection_input_row(self.hbond_hydration_residue_edit, include_saved=True),
-        )
-
-        self.hbond_hydration_distance_spin = QtWidgets.QDoubleSpinBox()
-        self.hbond_hydration_distance_spin.setRange(0.0, 10.0)
-        self.hbond_hydration_distance_spin.setDecimals(3)
-        self.hbond_hydration_distance_spin.setSingleStep(0.1)
-        form.addRow("Distance cutoff (A)", self.hbond_hydration_distance_spin)
-
-        self.hbond_hydration_angle_spin = QtWidgets.QDoubleSpinBox()
-        self.hbond_hydration_angle_spin.setRange(0.0, 180.0)
-        self.hbond_hydration_angle_spin.setDecimals(1)
-        self.hbond_hydration_angle_spin.setSingleStep(1.0)
-        form.addRow("Angle cutoff (deg)", self.hbond_hydration_angle_spin)
-
-        self.hbond_hydration_conditioning_combo = QtWidgets.QComboBox()
-        self.hbond_hydration_conditioning_combo.addItems(
-            ["SOZ-conditioned", "Unconditioned (all frames)"]
-        )
-        form.addRow("Conditioning", self.hbond_hydration_conditioning_combo)
-
-        self.hbond_hydration_soz_combo = QtWidgets.QComboBox()
-        self._register_soz_combo(self.hbond_hydration_soz_combo, allow_default=True)
-        form.addRow("SOZ name", self.hbond_hydration_soz_combo)
-
-        detail_layout.addWidget(details_group)
-
-        self.hbond_hydration_advanced_toggle = QtWidgets.QCheckBox("<> Advanced")
-        self.hbond_hydration_advanced_toggle.toggled.connect(self._toggle_hbond_hydration_advanced)
-        detail_layout.addWidget(self.hbond_hydration_advanced_toggle)
-
-        self.hbond_hydration_advanced_group = QtWidgets.QGroupBox("Advanced selection overrides (optional)")
-        advanced_form = QtWidgets.QFormLayout(self.hbond_hydration_advanced_group)
-        self.hbond_hydration_water_edit = QtWidgets.QLineEdit()
-        self.hbond_hydration_water_edit.setPlaceholderText("Defaults to solvent water selection")
-        advanced_form.addRow(
-            "Water selection",
-            self._build_selection_input_row(self.hbond_hydration_water_edit, include_saved=True),
-        )
-        self.hbond_hydration_donors_edit = QtWidgets.QLineEdit()
-        advanced_form.addRow(
-            "Donors selection",
-            self._build_selection_input_row(self.hbond_hydration_donors_edit, include_saved=True),
-        )
-        self.hbond_hydration_hydrogens_edit = QtWidgets.QLineEdit()
-        advanced_form.addRow(
-            "Hydrogens selection",
-            self._build_selection_input_row(self.hbond_hydration_hydrogens_edit, include_saved=True),
-        )
-        self.hbond_hydration_acceptors_edit = QtWidgets.QLineEdit()
-        advanced_form.addRow(
-            "Acceptors selection",
-            self._build_selection_input_row(self.hbond_hydration_acceptors_edit, include_saved=True),
-        )
-        self.hbond_hydration_update_check = QtWidgets.QCheckBox("Update selections each frame")
-        self.hbond_hydration_update_check.setChecked(True)
-        advanced_form.addRow("", self.hbond_hydration_update_check)
-        self.hbond_hydration_advanced_group.setVisible(False)
-        detail_layout.addWidget(self.hbond_hydration_advanced_group)
-
-        self.hbond_hydration_warning = QtWidgets.QLabel("")
-        self.hbond_hydration_warning.setWordWrap(True)
-        detail_layout.addWidget(self.hbond_hydration_warning)
-        detail_layout.addStretch(1)
-
-        self.hbond_hydration_detail_scroll.setWidget(detail_panel)
-        body.addWidget(self.hbond_hydration_detail_scroll, 2)
-        layout.addLayout(body)
-
-        for widget in (
-            self.hbond_hydration_name_edit,
-            self.hbond_hydration_residue_edit,
-            self.hbond_hydration_conditioning_combo,
-            self.hbond_hydration_soz_combo,
-            self.hbond_hydration_water_edit,
-            self.hbond_hydration_donors_edit,
-            self.hbond_hydration_hydrogens_edit,
-            self.hbond_hydration_acceptors_edit,
-        ):
-            if isinstance(widget, QtWidgets.QComboBox):
-                widget.currentTextChanged.connect(self._on_hbond_hydration_form_changed)
-            else:
-                widget.textChanged.connect(self._on_hbond_hydration_form_changed)
-        self.hbond_hydration_distance_spin.valueChanged.connect(self._on_hbond_hydration_form_changed)
-        self.hbond_hydration_angle_spin.valueChanged.connect(self._on_hbond_hydration_form_changed)
-        self.hbond_hydration_update_check.toggled.connect(self._on_hbond_hydration_form_changed)
-
-        return panel
-
     def _build_density_tab(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
@@ -5627,148 +4875,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.density_grid_spin.valueChanged.connect(self._on_density_form_changed)
         self.density_padding_spin.valueChanged.connect(self._on_density_form_changed)
         self.density_stride_spin.valueChanged.connect(self._on_density_form_changed)
-
-        return panel
-
-    def _build_water_dynamics_tab(self) -> QtWidgets.QWidget:
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-
-        intro = QtWidgets.QLabel(
-            "Water dynamics computes residence survival (SP(tau)) and optional HBL/WOR metrics. "
-            "Define the region via SOZ or an explicit selection.\n"
-            "Explore: Water Dynamics tab shows SP(tau), HBL, and WOR plots plus summaries."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-
-        body = QtWidgets.QHBoxLayout()
-
-        list_panel = QtWidgets.QWidget()
-        list_layout = QtWidgets.QVBoxLayout(list_panel)
-        list_layout.addWidget(QtWidgets.QLabel("Configured water dynamics"))
-        self.water_dynamics_list = QtWidgets.QListWidget()
-        self.water_dynamics_list.currentRowChanged.connect(self._on_water_dynamics_selected)
-        list_layout.addWidget(self.water_dynamics_list, 1)
-        list_buttons = QtWidgets.QHBoxLayout()
-        add_btn = QtWidgets.QPushButton("Add")
-        dup_btn = QtWidgets.QPushButton("Duplicate")
-        remove_btn = QtWidgets.QPushButton("Remove")
-        add_btn.clicked.connect(self._add_water_dynamics_row)
-        dup_btn.clicked.connect(self._duplicate_water_dynamics_row)
-        remove_btn.clicked.connect(self._remove_water_dynamics_row)
-        list_buttons.addWidget(add_btn)
-        list_buttons.addWidget(dup_btn)
-        list_buttons.addWidget(remove_btn)
-        list_buttons.addStretch(1)
-        list_layout.addLayout(list_buttons)
-        body.addWidget(list_panel, 1)
-
-        self.water_dynamics_detail_scroll = QtWidgets.QScrollArea()
-        self.water_dynamics_detail_scroll.setWidgetResizable(True)
-        detail_panel = QtWidgets.QWidget()
-        detail_layout = QtWidgets.QVBoxLayout(detail_panel)
-
-        details_group = QtWidgets.QGroupBox("Water dynamics details")
-        form = QtWidgets.QFormLayout(details_group)
-
-        self.water_dynamics_name_edit = QtWidgets.QLineEdit()
-        self.water_dynamics_name_edit.setPlaceholderText("e.g., water_dynamics")
-        form.addRow("Name", self.water_dynamics_name_edit)
-
-        self.water_dynamics_region_mode_combo = QtWidgets.QComboBox()
-        self.water_dynamics_region_mode_combo.addItems(["soz", "selection"])
-        form.addRow("Region mode", self.water_dynamics_region_mode_combo)
-
-        self.water_dynamics_soz_combo = QtWidgets.QComboBox()
-        self._register_soz_combo(self.water_dynamics_soz_combo, allow_default=True)
-        form.addRow("SOZ name", self.water_dynamics_soz_combo)
-
-        self.water_dynamics_region_selection_edit = QtWidgets.QLineEdit()
-        self.water_dynamics_region_selection_edit.setPlaceholderText("Selection for region when mode=selection")
-        form.addRow(
-            "Region selection",
-            self._build_selection_input_row(self.water_dynamics_region_selection_edit, include_saved=True),
-        )
-
-        self.water_dynamics_region_cutoff_spin = QtWidgets.QDoubleSpinBox()
-        self.water_dynamics_region_cutoff_spin.setRange(0.0, 100.0)
-        self.water_dynamics_region_cutoff_spin.setDecimals(3)
-        self.water_dynamics_region_cutoff_spin.setSingleStep(0.1)
-        form.addRow("Region cutoff", self.water_dynamics_region_cutoff_spin)
-
-        self.water_dynamics_region_unit_combo = QtWidgets.QComboBox()
-        self.water_dynamics_region_unit_combo.addItems(["A", "nm"])
-        form.addRow("Region unit", self.water_dynamics_region_unit_combo)
-
-        self.water_dynamics_region_probe_combo = QtWidgets.QComboBox()
-        self.water_dynamics_region_probe_combo.addItems(["probe", "atom", "com", "cog", "all"])
-        form.addRow("Region probe mode", self.water_dynamics_region_probe_combo)
-
-        self.water_dynamics_residence_combo = QtWidgets.QComboBox()
-        self.water_dynamics_residence_combo.addItems(["continuous", "intermittent"])
-        form.addRow("Residence mode", self.water_dynamics_residence_combo)
-
-        self.water_dynamics_solute_edit = QtWidgets.QLineEdit()
-        self.water_dynamics_solute_edit.setPlaceholderText("Solute selection for HBL (optional)")
-        form.addRow(
-            "Solute selection",
-            self._build_selection_input_row(self.water_dynamics_solute_edit, include_saved=True),
-        )
-
-        self.water_dynamics_water_edit = QtWidgets.QLineEdit()
-        self.water_dynamics_water_edit.setPlaceholderText("Water selection (optional)")
-        form.addRow(
-            "Water selection",
-            self._build_selection_input_row(self.water_dynamics_water_edit, include_saved=True),
-        )
-
-        self.water_dynamics_hbond_distance_spin = QtWidgets.QDoubleSpinBox()
-        self.water_dynamics_hbond_distance_spin.setRange(0.0, 10.0)
-        self.water_dynamics_hbond_distance_spin.setDecimals(3)
-        self.water_dynamics_hbond_distance_spin.setSingleStep(0.1)
-        form.addRow("H-bond distance (A)", self.water_dynamics_hbond_distance_spin)
-
-        self.water_dynamics_hbond_angle_spin = QtWidgets.QDoubleSpinBox()
-        self.water_dynamics_hbond_angle_spin.setRange(0.0, 180.0)
-        self.water_dynamics_hbond_angle_spin.setDecimals(1)
-        self.water_dynamics_hbond_angle_spin.setSingleStep(1.0)
-        form.addRow("H-bond angle (deg)", self.water_dynamics_hbond_angle_spin)
-
-        self.water_dynamics_update_check = QtWidgets.QCheckBox("Update selections each frame")
-        self.water_dynamics_update_check.setChecked(True)
-        form.addRow("", self.water_dynamics_update_check)
-
-        detail_layout.addWidget(details_group)
-
-        self.water_dynamics_warning = QtWidgets.QLabel("")
-        self.water_dynamics_warning.setWordWrap(True)
-        detail_layout.addWidget(self.water_dynamics_warning)
-        detail_layout.addStretch(1)
-
-        self.water_dynamics_detail_scroll.setWidget(detail_panel)
-        body.addWidget(self.water_dynamics_detail_scroll, 2)
-        layout.addLayout(body)
-
-        for widget in (
-            self.water_dynamics_name_edit,
-            self.water_dynamics_region_mode_combo,
-            self.water_dynamics_soz_combo,
-            self.water_dynamics_region_selection_edit,
-            self.water_dynamics_region_unit_combo,
-            self.water_dynamics_region_probe_combo,
-            self.water_dynamics_residence_combo,
-            self.water_dynamics_solute_edit,
-            self.water_dynamics_water_edit,
-        ):
-            if isinstance(widget, QtWidgets.QComboBox):
-                widget.currentTextChanged.connect(self._on_water_dynamics_form_changed)
-            else:
-                widget.textChanged.connect(self._on_water_dynamics_form_changed)
-        self.water_dynamics_region_cutoff_spin.valueChanged.connect(self._on_water_dynamics_form_changed)
-        self.water_dynamics_hbond_distance_spin.valueChanged.connect(self._on_water_dynamics_form_changed)
-        self.water_dynamics_hbond_angle_spin.valueChanged.connect(self._on_water_dynamics_form_changed)
-        self.water_dynamics_update_check.toggled.connect(self._on_water_dynamics_form_changed)
 
         return panel
 
@@ -6399,10 +5505,6 @@ class MainWindow(QtWidgets.QMainWindow):
         buttons.rejected.connect(dialog.reject)
         dialog.exec()
 
-    def _toggle_hbond_bridge_advanced(self, enabled: bool) -> None:
-        if hasattr(self, "hbond_bridge_advanced_group"):
-            self.hbond_bridge_advanced_group.setVisible(enabled)
-
     def _toggle_hbond_hydration_advanced(self, enabled: bool) -> None:
         if hasattr(self, "hbond_hydration_advanced_group"):
             self.hbond_hydration_advanced_group.setVisible(enabled)
@@ -6425,17 +5527,6 @@ class MainWindow(QtWidgets.QMainWindow):
             idx += 1
         return f"{base}_{idx}"
 
-    def _distance_bridge_item_text(self, bridge: DistanceBridgeConfig) -> str:
-        sel_a = self._selection_display_for_label(bridge.selection_a)
-        sel_b = self._selection_display_for_label(bridge.selection_b)
-        return f"{bridge.name} ({sel_a} <-> {sel_b})"
-
-    def _hbond_bridge_item_text(self, bridge: HbondWaterBridgeConfig) -> str:
-        sel_a = self._selection_display_for_label(bridge.selection_a)
-        sel_b = self._selection_display_for_label(bridge.selection_b)
-        return f"{bridge.name} ({sel_a} <-> {sel_b})"
-
-
     def _hbond_hydration_item_text(self, cfg: HbondHydrationConfig) -> str:
         return f"{cfg.name} ({cfg.residue_selection})"
 
@@ -6445,43 +5536,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _water_dynamics_item_text(self, cfg: WaterDynamicsConfig) -> str:
         region = cfg.region_mode
         return f"{cfg.name} ({region})"
-
-    def _refresh_distance_bridge_table(self) -> None:
-        if not hasattr(self, "distance_bridge_list"):
-            return
-        project = self.state.project
-        if not project:
-            return
-        self._distance_bridge_refreshing = True
-        current = self.distance_bridge_list.currentRow()
-        self.distance_bridge_list.clear()
-        for bridge in project.distance_bridges:
-            self.distance_bridge_list.addItem(self._distance_bridge_item_text(bridge))
-        self._distance_bridge_refreshing = False
-        if project.distance_bridges:
-            idx = current if 0 <= current < len(project.distance_bridges) else 0
-            self.distance_bridge_list.setCurrentRow(idx)
-        else:
-            self._load_distance_bridge_form(None)
-
-    def _refresh_hbond_bridge_table(self) -> None:
-        if not hasattr(self, "hbond_bridge_list"):
-            return
-        project = self.state.project
-        if not project:
-            return
-        self._hbond_bridge_refreshing = True
-        current = self.hbond_bridge_list.currentRow()
-        self.hbond_bridge_list.clear()
-        for bridge in project.hbond_water_bridges:
-            self.hbond_bridge_list.addItem(self._hbond_bridge_item_text(bridge))
-        self._hbond_bridge_refreshing = False
-        if project.hbond_water_bridges:
-            idx = current if 0 <= current < len(project.hbond_water_bridges) else 0
-            self.hbond_bridge_list.setCurrentRow(idx)
-        else:
-            self._load_hbond_bridge_form(None)
-
 
     def _refresh_hbond_hydration_table(self) -> None:
         if not hasattr(self, "hbond_hydration_list"):
@@ -6537,94 +5591,6 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._load_water_dynamics_form(None)
 
-    def _add_distance_bridge_row(self) -> None:
-        if not self._ensure_project():
-            return
-        project = self.state.project
-        if not project:
-            return
-        labels = list(project.selections.keys())
-        sel_a = labels[0] if labels else ""
-        sel_b = labels[1] if len(labels) > 1 else (labels[0] if labels else "")
-        name = self._unique_name("distance_bridge", [b.name for b in project.distance_bridges])
-        bridge = DistanceBridgeConfig(
-            name=name,
-            selection_a=sel_a,
-            selection_b=sel_b,
-            cutoff_a=3.5,
-            cutoff_b=3.5,
-            unit="A",
-            atom_mode="probe",
-        )
-        project.distance_bridges.append(bridge)
-        self._refresh_distance_bridge_table()
-        self.distance_bridge_list.setCurrentRow(len(project.distance_bridges) - 1)
-
-    def _duplicate_distance_bridge_row(self) -> None:
-        if not self.state.project or not hasattr(self, "distance_bridge_list"):
-            return
-        idx = self.distance_bridge_list.currentRow()
-        if idx < 0 or idx >= len(self.state.project.distance_bridges):
-            return
-        clone = copy.deepcopy(self.state.project.distance_bridges[idx])
-        clone.name = self._unique_name(f"{clone.name}_copy", [b.name for b in self.state.project.distance_bridges])
-        self.state.project.distance_bridges.append(clone)
-        self._refresh_distance_bridge_table()
-        self.distance_bridge_list.setCurrentRow(len(self.state.project.distance_bridges) - 1)
-
-    def _remove_distance_bridge_row(self) -> None:
-        if not self.state.project or not hasattr(self, "distance_bridge_list"):
-            return
-        idx = self.distance_bridge_list.currentRow()
-        if idx < 0:
-            return
-        self.state.project.distance_bridges.pop(idx)
-        self._refresh_distance_bridge_table()
-
-    def _add_hbond_bridge_row(self) -> None:
-        if not self._ensure_project():
-            return
-        project = self.state.project
-        if not project:
-            return
-        labels = list(project.selections.keys())
-        sel_a = labels[0] if labels else ""
-        sel_b = labels[1] if len(labels) > 1 else (labels[0] if labels else "")
-        name = self._unique_name("hbond_bridge", [b.name for b in project.hbond_water_bridges])
-        bridge = HbondWaterBridgeConfig(
-            name=name,
-            selection_a=sel_a,
-            selection_b=sel_b,
-            distance=3.0,
-            angle=150.0,
-            update_selections=True,
-        )
-        project.hbond_water_bridges.append(bridge)
-        self._refresh_hbond_bridge_table()
-        self.hbond_bridge_list.setCurrentRow(len(project.hbond_water_bridges) - 1)
-
-    def _duplicate_hbond_bridge_row(self) -> None:
-        if not self.state.project or not hasattr(self, "hbond_bridge_list"):
-            return
-        idx = self.hbond_bridge_list.currentRow()
-        if idx < 0 or idx >= len(self.state.project.hbond_water_bridges):
-            return
-        clone = copy.deepcopy(self.state.project.hbond_water_bridges[idx])
-        clone.name = self._unique_name(f"{clone.name}_copy", [b.name for b in self.state.project.hbond_water_bridges])
-        self.state.project.hbond_water_bridges.append(clone)
-        self._refresh_hbond_bridge_table()
-        self.hbond_bridge_list.setCurrentRow(len(self.state.project.hbond_water_bridges) - 1)
-
-    def _remove_hbond_bridge_row(self) -> None:
-        if not self.state.project or not hasattr(self, "hbond_bridge_list"):
-            return
-        idx = self.hbond_bridge_list.currentRow()
-        if idx < 0:
-            return
-        self.state.project.hbond_water_bridges.pop(idx)
-        self._refresh_hbond_bridge_table()
-
-
     def _add_hbond_hydration_row(self) -> None:
         if not self._ensure_project():
             return
@@ -6673,9 +5639,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not project:
             return
         name = self._unique_name("density_map", [c.name for c in project.density_maps])
+        probe_sel = project.solvent.probe.selection or "name O OW OH2"
         cfg = DensityMapConfig(
             name=name,
-            species_selection="name O",
+            species_selection=probe_sel,
             grid_spacing=1.0,
             padding=2.0,
             stride=1,
@@ -6750,17 +5717,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state.project.water_dynamics.pop(idx)
         self._refresh_water_dynamics_table()
 
-    def _on_distance_bridge_selected(self, row: int) -> None:
-        if getattr(self, "_distance_bridge_refreshing", False):
-            return
-        self._load_distance_bridge_form(row)
-
-    def _on_hbond_bridge_selected(self, row: int) -> None:
-        if getattr(self, "_hbond_bridge_refreshing", False):
-            return
-        self._load_hbond_bridge_form(row)
-
-
     def _on_hbond_hydration_selected(self, row: int) -> None:
         if getattr(self, "_hbond_hydration_refreshing", False):
             return
@@ -6775,69 +5731,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_water_dynamics_refreshing", False):
             return
         self._load_water_dynamics_form(row)
-
-    def _load_distance_bridge_form(self, row: int | None) -> None:
-        if not self.state.project or not hasattr(self, "distance_bridge_detail_scroll"):
-            return
-        bridges = self.state.project.distance_bridges
-        if row is None or row < 0 or row >= len(bridges):
-            self.distance_bridge_detail_scroll.setEnabled(False)
-            if hasattr(self, "distance_bridge_warning"):
-                self.distance_bridge_warning.setText("No distance bridges configured yet.")
-            return
-        bridge = bridges[row]
-        self._distance_bridge_form_updating = True
-        self.distance_bridge_detail_scroll.setEnabled(True)
-        self.distance_bridge_name_edit.setText(bridge.name)
-        self._set_selection_combo_value(self.distance_bridge_sel_a_combo, bridge.selection_a)
-        self._set_selection_combo_value(self.distance_bridge_sel_b_combo, bridge.selection_b)
-        self.distance_bridge_cutoff_a_spin.setValue(float(bridge.cutoff_a))
-        self.distance_bridge_cutoff_b_spin.setValue(float(bridge.cutoff_b))
-        self.distance_bridge_unit_combo.setCurrentText(bridge.unit or "A")
-        self.distance_bridge_probe_combo.setCurrentText(bridge.atom_mode or "probe")
-        self._distance_bridge_form_updating = False
-        self._validate_distance_bridge_form()
-
-    def _load_hbond_bridge_form(self, row: int | None) -> None:
-        if not self.state.project or not hasattr(self, "hbond_bridge_detail_scroll"):
-            return
-        bridges = self.state.project.hbond_water_bridges
-        if row is None or row < 0 or row >= len(bridges):
-            self.hbond_bridge_detail_scroll.setEnabled(False)
-            if hasattr(self, "hbond_bridge_warning"):
-                self.hbond_bridge_warning.setText("No H-bond bridges configured yet.")
-            return
-        bridge = bridges[row]
-        self._hbond_bridge_form_updating = True
-        self.hbond_bridge_detail_scroll.setEnabled(True)
-        self.hbond_bridge_name_edit.setText(bridge.name)
-        self._set_selection_combo_value(self.hbond_bridge_sel_a_combo, bridge.selection_a)
-        self._set_selection_combo_value(self.hbond_bridge_sel_b_combo, bridge.selection_b)
-        self.hbond_bridge_distance_spin.setValue(float(bridge.distance))
-        self.hbond_bridge_angle_spin.setValue(float(bridge.angle))
-        self.hbond_bridge_water_edit.setText(bridge.water_selection or "")
-        self.hbond_bridge_donors_edit.setText(bridge.donors_selection or "")
-        self.hbond_bridge_hydrogens_edit.setText(bridge.hydrogens_selection or "")
-        self.hbond_bridge_acceptors_edit.setText(bridge.acceptors_selection or "")
-        self.hbond_bridge_update_check.setChecked(bool(bridge.update_selections))
-        idx_backend = self.hbond_bridge_backend_combo.findText(bridge.backend)
-        if idx_backend >= 0:
-            self.hbond_bridge_backend_combo.setCurrentIndex(idx_backend)
-        else:
-            self.hbond_bridge_backend_combo.setCurrentIndex(0)
-        advanced_on = any(
-            [
-                bridge.water_selection,
-                bridge.donors_selection,
-                bridge.hydrogens_selection,
-                bridge.acceptors_selection,
-            ]
-        )
-        self.hbond_bridge_advanced_toggle.setChecked(advanced_on)
-        self.hbond_bridge_advanced_group.setVisible(advanced_on)
-        self._hbond_bridge_form_updating = False
-        self._validate_hbond_bridge_form()
-
 
     def _load_hbond_hydration_form(self, row: int | None) -> None:
         if not self.state.project or not hasattr(self, "hbond_hydration_detail_scroll"):
@@ -6938,56 +5831,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_water_dynamics_controls()
         self._validate_water_dynamics_form()
 
-    def _on_distance_bridge_form_changed(self) -> None:
-        if getattr(self, "_distance_bridge_form_updating", False):
-            return
-        if not self.state.project or not hasattr(self, "distance_bridge_list"):
-            return
-        idx = self.distance_bridge_list.currentRow()
-        if idx < 0 or idx >= len(self.state.project.distance_bridges):
-            return
-        bridge = self.state.project.distance_bridges[idx]
-        name = self.distance_bridge_name_edit.text().strip()
-        bridge.name = name or f"distance_bridge_{idx+1}"
-        bridge.selection_a = self._selection_combo_value(self.distance_bridge_sel_a_combo)
-        bridge.selection_b = self._selection_combo_value(self.distance_bridge_sel_b_combo)
-        bridge.cutoff_a = float(self.distance_bridge_cutoff_a_spin.value())
-        bridge.cutoff_b = float(self.distance_bridge_cutoff_b_spin.value())
-        bridge.unit = self.distance_bridge_unit_combo.currentText().strip() or "A"
-        bridge.atom_mode = self.distance_bridge_probe_combo.currentText().strip() or "probe"
-        item = self.distance_bridge_list.item(idx)
-        if item is not None:
-            item.setText(self._distance_bridge_item_text(bridge))
-        self._validate_distance_bridge_form()
-        self._refresh_project_doctor_if_initialized()
-
-    def _on_hbond_bridge_form_changed(self) -> None:
-        if getattr(self, "_hbond_bridge_form_updating", False):
-            return
-        if not self.state.project or not hasattr(self, "hbond_bridge_list"):
-            return
-        idx = self.hbond_bridge_list.currentRow()
-        if idx < 0 or idx >= len(self.state.project.hbond_water_bridges):
-            return
-        bridge = self.state.project.hbond_water_bridges[idx]
-        name = self.hbond_bridge_name_edit.text().strip()
-        bridge.name = name or f"hbond_bridge_{idx+1}"
-        bridge.selection_a = self._selection_combo_value(self.hbond_bridge_sel_a_combo)
-        bridge.selection_b = self._selection_combo_value(self.hbond_bridge_sel_b_combo)
-        bridge.distance = float(self.hbond_bridge_distance_spin.value())
-        bridge.angle = float(self.hbond_bridge_angle_spin.value())
-        bridge.water_selection = self.hbond_bridge_water_edit.text().strip() or None
-        bridge.donors_selection = self.hbond_bridge_donors_edit.text().strip() or None
-        bridge.hydrogens_selection = self.hbond_bridge_hydrogens_edit.text().strip() or None
-        bridge.acceptors_selection = self.hbond_bridge_acceptors_edit.text().strip() or None
-        bridge.update_selections = bool(self.hbond_bridge_update_check.isChecked())
-        bridge.backend = self.hbond_bridge_backend_combo.currentText().strip()
-        item = self.hbond_bridge_list.item(idx)
-        if item is not None:
-            item.setText(self._hbond_bridge_item_text(bridge))
-        self._validate_hbond_bridge_form()
-
-
     def _on_hbond_hydration_form_changed(self) -> None:
         if getattr(self, "_hbond_hydration_form_updating", False):
             return
@@ -7036,7 +5879,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Density selection normalized to '{normalized_selection}'.",
                 5000,
             )
-        cfg.species_selection = normalized_selection or "name O"
+        probe_fallback = self.state.project.solvent.probe.selection if self.state.project else "name O OW OH2"
+        cfg.species_selection = normalized_selection or probe_fallback
         cfg.grid_spacing = float(self.density_grid_spin.value())
         cfg.padding = float(self.density_padding_spin.value())
         cfg.stride = int(self.density_stride_spin.value())
@@ -7080,42 +5924,6 @@ class MainWindow(QtWidgets.QMainWindow):
             item.setText(self._water_dynamics_item_text(cfg))
         self._sync_water_dynamics_controls()
         self._validate_water_dynamics_form()
-
-    def _validate_distance_bridge_form(self) -> None:
-        if not hasattr(self, "distance_bridge_warning") or not self.state.project:
-            return
-        messages = []
-        sel_a = self._selection_combo_value(self.distance_bridge_sel_a_combo)
-        sel_b = self._selection_combo_value(self.distance_bridge_sel_b_combo)
-        if not sel_a:
-            messages.append("Selection A is required.")
-        elif sel_a not in self.state.project.selections:
-            messages.append(f"Selection A '{sel_a}' is not defined. Click New to create it.")
-        if not sel_b:
-            messages.append("Selection B is required.")
-        elif sel_b not in self.state.project.selections:
-            messages.append(f"Selection B '{sel_b}' is not defined. Click New to create it.")
-        if self.distance_bridge_cutoff_a_spin.value() <= 0:
-            messages.append("Cutoff A must be > 0.")
-        if self.distance_bridge_cutoff_b_spin.value() <= 0:
-            messages.append("Cutoff B must be > 0.")
-        self.distance_bridge_warning.setText(" ".join(messages))
-
-    def _validate_hbond_bridge_form(self) -> None:
-        if not hasattr(self, "hbond_bridge_warning"):
-            return
-        messages = []
-        sel_a = self._selection_combo_value(self.hbond_bridge_sel_a_combo)
-        sel_b = self._selection_combo_value(self.hbond_bridge_sel_b_combo)
-        if not sel_a:
-            messages.append("Selection A is required.")
-        if not sel_b:
-            messages.append("Selection B is required.")
-        if self.hbond_bridge_distance_spin.value() <= 0:
-            messages.append("Distance cutoff must be > 0.")
-        if self.hbond_bridge_angle_spin.value() <= 0:
-            messages.append("Angle cutoff must be > 0.")
-        self.hbond_bridge_warning.setText(" ".join(messages))
 
     def _validate_hbond_hydration_form(self) -> None:
         if not hasattr(self, "hbond_hydration_warning"):
@@ -7260,7 +6068,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _strip_removed_analysis_options(self, project: ProjectConfig | None) -> None:
         if not project:
             return
-        project.hbond_water_bridges.clear()
         project.hbond_hydration.clear()
         project.water_dynamics.clear()
 
@@ -7350,7 +6157,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_output_controls()
         self._refresh_selection_combos()
         self._refresh_soz_combos()
-        self._refresh_distance_bridge_table()
         self._refresh_density_table()
         self._refresh_defined_soz_panel()
         self._refresh_soz_combos()
@@ -8010,8 +6816,6 @@ class MainWindow(QtWidgets.QMainWindow):
             sozs=[soz],
             analysis=base.analysis,
             outputs=base.outputs,
-            distance_bridges=base.distance_bridges,
-            hbond_water_bridges=[],
             hbond_hydration=[],
             density_maps=base.density_maps,
             water_dynamics=[],
@@ -8641,7 +7445,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.doctor_text.setText("\n".join(lines))
 
-        selection_checks = report.selection_checks or report.seed_checks or {}
+        selection_checks = report.selection_checks or {}
         self.doctor_seed_table.setRowCount(0)
         if selection_checks:
             self.doctor_seed_table.setRowCount(len(selection_checks))
@@ -8997,7 +7801,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._update_hist_plot, "histogram"),
             (self._update_event_plot, "event_plot"),
             (self._update_tables_for_selected_soz, "tables"),
-            (self._update_bridge_explore, "bridge_explore"),
+
             (self._update_density_explore, "density_explore"),
         ):
             try:
@@ -9038,309 +7842,6 @@ class MainWindow(QtWidgets.QMainWindow):
         per_frame = self._filtered_per_frame(soz.per_frame)
         self._set_table(self.per_frame_table, per_frame)
         self._set_table(self.per_solvent_table, soz.per_solvent)
-
-    def _update_bridge_explore(self) -> None:
-        if not self.current_result:
-            return
-        distance_names = list(self.current_result.distance_bridge_results.keys())
-        self.distance_bridge_combo.blockSignals(True)
-        self.distance_bridge_combo.clear()
-        self.distance_bridge_combo.addItems(distance_names)
-        if distance_names:
-            self.distance_bridge_combo.setCurrentIndex(0)
-        self.distance_bridge_combo.blockSignals(False)
-        self._update_distance_bridge_plots()
-
-    def _bridge_time_axis(self, per_frame: pd.DataFrame) -> tuple[np.ndarray, str]:
-        if "time" in per_frame.columns:
-            time_ns = pd.to_numeric(per_frame["time"], errors="coerce").to_numpy() / 1000.0
-            return time_ns, "Time (ns)"
-        frames = pd.to_numeric(per_frame.get("frame", []), errors="coerce").to_numpy()
-        return frames, "Frame"
-
-    def _update_distance_bridge_plots(self) -> None:
-        self.distance_bridge_timeseries_plot.clear()
-        self.distance_bridge_residence_plot.clear()
-        self.distance_bridge_top_plot.clear()
-
-        # [UX Improvement] Helper for consistent titles
-        def set_title(plot, title, caption):
-            plot.setTitle(
-                "<div style='text-align:center'>"
-                f"<span style='font-size: 10pt; font-weight: bold'>{title}</span><br>"
-                f"<span style='font-size: 8pt; color: #a0a0a0'>{caption}</span>"
-                "</div>"
-            )
-
-        if not self.current_result or not self.current_result.distance_bridge_results:
-            self.distance_bridge_timeseries_plot.addItem(
-                pg.TextItem("No distance bridge results.", color=self._get_theme_tokens()["text_muted"])
-            )
-            self._set_plot_insights("bridge_distance", ["n=0", "mean=0.000", "max=0.000", "top3=none"])
-            return
-        name = self.distance_bridge_combo.currentText()
-        if not name:
-            name = next(iter(self.current_result.distance_bridge_results.keys()), "")
-        bridge = self.current_result.distance_bridge_results.get(name)
-        if bridge is None:
-            self.distance_bridge_timeseries_plot.addItem(
-                pg.TextItem("No data for selected bridge.", color=self._get_theme_tokens()["text_muted"])
-            )
-            self._set_plot_insights("bridge_distance", ["n=0", "mean=0.000", "max=0.000", "top3=none"])
-            return
-        if bridge.per_frame.empty:
-            self.distance_bridge_timeseries_plot.addItem(
-                pg.TextItem("Bridge has no frames (check selections).", color=self._get_theme_tokens()["text_muted"])
-            )
-            self._set_plot_insights("bridge_distance", ["n=0", "mean=0.000", "max=0.000", "top3=none"])
-            return
-        
-        set_title(self.distance_bridge_timeseries_plot, "Distance Bridge", "Number of bridging solvent residues over time")
-        set_title(self.distance_bridge_residence_plot, "Residence Time Distribution", "How long bridging events persist (Survival Probability)")
-        set_title(self.distance_bridge_top_plot, "Top Bridging Residues", "Solvent residues with highest bridging occupancy")
-
-        x, x_label = self._bridge_time_axis(bridge.per_frame)
-        y = pd.to_numeric(bridge.per_frame["n_solvent"], errors="coerce").fillna(0).to_numpy()
-        if self.distance_bridge_smooth_check.isChecked():
-            window = int(self.distance_bridge_smooth_window.value() or 1)
-            y = pd.Series(y).rolling(window=window, min_periods=1).mean().to_numpy()
-        self.distance_bridge_timeseries_plot.setLabel("bottom", x_label)
-        self.distance_bridge_timeseries_plot.plot(
-            x,
-            y,
-            pen=pg.mkPen(self._get_theme_tokens()["accent"], width=self._plot_line_width),
-        )
-
-        durations = []
-        dt = float(bridge.summary.get("dt", 1.0))
-        time_unit = bridge.summary.get("time_unit", "ps")
-        scale_to_ns = 1.0
-        if time_unit == "ps":
-            scale_to_ns = 1e-3
-        elif time_unit == "fs":
-            scale_to_ns = 1e-6
-            
-        for lengths in bridge.residence_cont.values():
-            durations.extend([length * dt * scale_to_ns for length in lengths])
-        if durations:
-            durations = np.array(durations, dtype=float)
-            durations.sort()
-            survival = 1.0 - np.arange(1, len(durations) + 1) / len(durations)
-            # [UX Improvement] Explicit units
-            self.distance_bridge_residence_plot.setLabel("bottom", "Residence Time (ns)")
-            self.distance_bridge_residence_plot.plot(
-                durations,
-                survival,
-                pen=pg.mkPen(self._get_theme_tokens()["accent_alt"], width=self._plot_line_width),
-                stepMode=False,
-            )
-            self.distance_bridge_residence_plot.autoRange()
-        else:
-            self.distance_bridge_residence_plot.addItem(pg.TextItem("No residence events found", anchor=(0.5, 0.5)))
-
-        per_solvent = bridge.per_solvent.head(10)
-        if not per_solvent.empty:
-            values = per_solvent["occupancy_pct"].to_numpy()
-            y_pos = np.arange(len(values))
-            bar = pg.BarGraphItem(
-                x0=0,
-                y=y_pos,
-                height=0.6,
-                width=values,
-                brush=self._get_theme_tokens()["accent"],
-            )
-            self.distance_bridge_top_plot.addItem(bar)
-            axis = self.distance_bridge_top_plot.getAxis("left")
-            labels = [
-                (idx, sid) for idx, sid in enumerate(per_solvent["solvent_id"].tolist())
-            ]
-            axis.setTicks([labels])
-            self.distance_bridge_top_plot.autoRange()
-        else:
-            self.distance_bridge_top_plot.addItem(pg.TextItem("No top bridges found", anchor=(0.5, 0.5)))
-        top3 = ", ".join(
-            f"{str(row.solvent_id)}:{float(row.occupancy_pct):.1f}%"
-            for row in bridge.per_solvent.head(3).itertuples()
-        )
-        self._set_plot_insights(
-            "bridge_distance",
-            [
-                f"n={len(y)}",
-                f"mean={float(np.mean(y)):.3f}",
-                f"max={float(np.max(y)):.3f}",
-                f"top3={top3 or 'none'}",
-            ],
-        )
-
-    def _update_hbond_bridge_plots(self) -> None:
-        self.hbond_bridge_timeseries_plot.clear()
-        self.hbond_bridge_residence_plot.clear()
-        self.hbond_bridge_top_plot.clear()
-        self.bridge_compare_plot.clear()
-        self.hbond_bridge_network_plot.clear()
-        
-        def set_title(plot, title, caption):
-             plot.setTitle(f"<span style='font-size: 10pt; font-weight: bold'>{title}</span><br><span style='font-size: 8pt; color: #a0a0a0'>{caption}</span>")
-             
-        if not self.current_result or not self.current_result.hbond_bridge_results:
-            self.hbond_bridge_timeseries_plot.addItem(
-                pg.TextItem("No H-bond bridge results.", color=self._get_theme_tokens()["text_muted"])
-            )
-            self._set_plot_insights("bridge_hbond", ["n=0", "mean=0.000", "max=0.000", "top3=none"])
-            return
-        name = self.hbond_bridge_combo.currentText()
-        bridge = self.current_result.hbond_bridge_results.get(name)
-        if bridge is None:
-            self.hbond_bridge_timeseries_plot.addItem(
-                pg.TextItem("No data for selected bridge.", color=self._get_theme_tokens()["text_muted"])
-            )
-            self._set_plot_insights("bridge_hbond", ["n=0", "mean=0.000", "max=0.000", "top3=none"])
-            return
-        if bridge.per_frame.empty:
-            self.hbond_bridge_timeseries_plot.addItem(
-                pg.TextItem("Bridge has no frames (check selections).", color=self._get_theme_tokens()["text_muted"])
-            )
-            self._set_plot_insights("bridge_hbond", ["n=0", "mean=0.000", "max=0.000", "top3=none"])
-            return
-            
-        set_title(self.hbond_bridge_timeseries_plot, f"H-bond Bridge: {name}", "Number of bridging waters per frame (H-bond definition)")
-        set_title(self.hbond_bridge_residence_plot, "Residence Time Distribution", "How long waters bridge continuously (Survival Probability)")
-        set_title(self.hbond_bridge_top_plot, "Top Bridging Waters", "Waters with highest bridging occupancy")
-        set_title(self.bridge_compare_plot, "Comparator: Distance vs H-bond", "Overlay of Distance (geometric) and H-bond (energetic) definitions")
-        set_title(self.hbond_bridge_network_plot, "Bridge Network", "Connectivity between selection groups via water")
-
-        x, x_label = self._bridge_time_axis(bridge.per_frame)
-        y = pd.to_numeric(bridge.per_frame["n_solvent"], errors="coerce").fillna(0).to_numpy()
-        if self.hbond_bridge_smooth_check.isChecked():
-            window = int(self.hbond_bridge_smooth_window.value() or 1)
-            y = pd.Series(y).rolling(window=window, min_periods=1).mean().to_numpy()
-        self.hbond_bridge_timeseries_plot.setLabel("bottom", x_label)
-        self.hbond_bridge_timeseries_plot.plot(
-            x,
-            y,
-            pen=pg.mkPen(self._get_theme_tokens()["accent"], width=self._plot_line_width),
-            name="H-bond",
-        )
-
-        durations = []
-        dt = float(bridge.summary.get("dt", 1.0))
-        durations = []
-        dt = float(bridge.summary.get("dt", 1.0))
-        time_unit = bridge.summary.get("time_unit", "ps")
-        scale_to_ns = 1.0
-        if time_unit == "ps":
-            scale_to_ns = 1e-3
-        elif time_unit == "fs":
-            scale_to_ns = 1e-6
-
-        for lengths in bridge.residence_cont.values():
-            durations.extend([length * dt * scale_to_ns for length in lengths])
-        if durations:
-            durations = np.array(durations, dtype=float)
-            durations.sort()
-            survival = 1.0 - np.arange(1, len(durations) + 1) / len(durations)
-            # [UX Improvement] Explicit units
-            self.hbond_bridge_residence_plot.setLabel("bottom", "Residence Time (ns)")
-            self.hbond_bridge_residence_plot.plot(
-                durations,
-                survival,
-                pen=pg.mkPen(self._get_theme_tokens()["accent_alt"], width=self._plot_line_width),
-                stepMode=False,
-            )
-            self.hbond_bridge_residence_plot.autoRange()
-        else:
-            self.hbond_bridge_residence_plot.addItem(pg.TextItem("No residence events found", anchor=(0.5, 0.5)))
-
-        per_solvent = bridge.per_solvent.head(10)
-        if not per_solvent.empty:
-            values = per_solvent["occupancy_pct"].to_numpy()
-            y_pos = np.arange(len(values))
-            bar = pg.BarGraphItem(
-                x0=0,
-                y=y_pos,
-                height=0.6,
-                width=values,
-                brush=self._get_theme_tokens()["accent"],
-            )
-            self.hbond_bridge_top_plot.addItem(bar)
-            axis = self.hbond_bridge_top_plot.getAxis("left")
-            labels = [
-                (idx, sid) for idx, sid in enumerate(per_solvent["solvent_id"].tolist())
-            ]
-            axis.setTicks([labels])
-            self.hbond_bridge_top_plot.autoRange()
-        else:
-            self.hbond_bridge_top_plot.addItem(pg.TextItem("No top bridges found", anchor=(0.5, 0.5)))
-
-        distance_name = self.distance_bridge_combo.currentText()
-        distance_bridge = (
-            self.current_result.distance_bridge_results.get(distance_name)
-            if self.current_result
-            else None
-        )
-        if self.bridge_compare_check.isChecked() and distance_bridge and not distance_bridge.per_frame.empty:
-            x_d, _ = self._bridge_time_axis(distance_bridge.per_frame)
-            y_d = (
-                pd.to_numeric(distance_bridge.per_frame["n_solvent"], errors="coerce")
-                .fillna(0)
-                .to_numpy()
-            )
-            self.bridge_compare_plot.plot(
-                x_d,
-                y_d,
-                pen=pg.mkPen(self._get_theme_tokens()["accent_alt"], width=self._plot_line_width),
-                name="Distance",
-            )
-        self.bridge_compare_plot.plot(
-            x,
-            y,
-            pen=pg.mkPen(self._get_theme_tokens()["accent"], width=self._plot_line_width),
-            name="H-bond",
-        )
-
-        if bridge.edge_list is None or bridge.edge_list.empty:
-            self.hbond_bridge_network_plot.addItem(
-                pg.TextItem("Edge list unavailable.", color=self._get_theme_tokens()["text_muted"])
-            )
-        else:
-            edge_df = bridge.edge_list.sort_values(by="frames_present", ascending=False).head(30)
-            nodes = list(dict.fromkeys(edge_df["source"].tolist() + edge_df["target"].tolist()))
-            if nodes:
-                angles = np.linspace(0, 2 * np.pi, len(nodes), endpoint=False)
-                pos = np.column_stack((np.cos(angles), np.sin(angles)))
-                node_index = {node: idx for idx, node in enumerate(nodes)}
-                edges = np.array(
-                    [
-                        [node_index[src], node_index[tgt]]
-                        for src, tgt in edge_df[["source", "target"]].itertuples(index=False)
-                    ],
-                    dtype=int,
-                )
-                graph = pg.GraphItem()
-                graph.setData(pos=pos, adj=edges, size=12, symbol="o", pen=pg.mkPen("#94a3b8"))
-                self.hbond_bridge_network_plot.addItem(graph)
-                for node, (xv, yv) in zip(nodes, pos):
-                    text = pg.TextItem(str(node), anchor=(0.5, -0.2))
-                    text.setPos(xv, yv)
-                    self.hbond_bridge_network_plot.addItem(text)
-        top3 = ", ".join(
-            f"{str(row.solvent_id)}:{float(row.occupancy_pct):.1f}%"
-            for row in bridge.per_solvent.head(3).itertuples()
-        )
-        self._set_plot_insights(
-            "bridge_hbond",
-            [
-                f"n={len(y)}",
-                f"mean={float(np.mean(y)):.3f}",
-                f"max={float(np.max(y)):.3f}",
-                f"top3={top3 or 'none'}",
-            ],
-        )
-
-    def _update_hydration_setup(self) -> None:
-        """Auto-select populated hydration mode if needed."""
-        # No-op since only H-bond hydration remains
-        pass
 
     def _refresh_hydration_combo(self) -> Dict[str, object]:
         if not self.current_result:
@@ -10096,18 +8597,6 @@ class MainWindow(QtWidgets.QMainWindow):
             ],
         )
 
-    def _update_water_dynamics_explore(self) -> None:
-        if not self.current_result:
-            return
-        names = list(self.current_result.water_dynamics_results.keys())
-        self.water_dynamics_combo.blockSignals(True)
-        self.water_dynamics_combo.clear()
-        self.water_dynamics_combo.addItems(names)
-        if names:
-            self.water_dynamics_combo.setCurrentIndex(0)
-        self.water_dynamics_combo.blockSignals(False)
-        self._update_water_dynamics_plots()
-
     def _selected_soz_name(self) -> Optional[str]:
         if not self.current_result or not self.current_result.soz_results:
             return None
@@ -10844,10 +9333,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             self.extract_output_edit.setText(path)
 
-    def _open_extract_output(self) -> None:
-        path_raw = self.extract_output_edit.text().strip()
-        self._open_directory(path_raw)
-
     def _on_extract_output_edited(self, text: str) -> None:
         if getattr(self, "_extract_output_linked", False):
             self.extract_link_check.setChecked(False)
@@ -11414,14 +9899,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.per_frame_table.setModel(empty_model)
         self.per_solvent_table.setModel(empty_model)
         for attr in (
-            "distance_bridge_timeseries_plot",
-            "distance_bridge_residence_plot",
-            "distance_bridge_top_plot",
-            "hbond_bridge_timeseries_plot",
-            "hbond_bridge_residence_plot",
-            "hbond_bridge_top_plot",
-            "bridge_compare_plot",
-            "hbond_bridge_network_plot",
             "hydration_frequency_plot",
             "hydration_top_plot",
             "hydration_timeline_plot",
@@ -11436,8 +9913,6 @@ class MainWindow(QtWidgets.QMainWindow):
             for img in self.density_images.values():
                 img.clear()
         for combo_attr in (
-            "distance_bridge_combo",
-            "hbond_bridge_combo",
             "hydration_config_combo",
             "density_combo",
             "water_dynamics_combo",
@@ -11489,29 +9964,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "events.png",
                 csv_exporter=self._write_event_raster_csv,
             )
-
-    def _export_distance_bridge_plot(self) -> None:
-        widget = self.distance_bridge_timeseries_plot
-        filename = "distance_bridge_timeseries.png"
-        self._export_plot(widget, filename, title="Export Distance Bridge Plot")
-
-    def _export_hbond_bridge_plot(self) -> None:
-        choice = self.hbond_bridge_export_combo.currentText()
-        widget = self.hbond_bridge_timeseries_plot
-        filename = "hbond_bridge_timeseries.png"
-        if choice.startswith("Residence"):
-            widget = self.hbond_bridge_residence_plot
-            filename = "hbond_bridge_residence.png"
-        elif choice.startswith("Top"):
-            widget = self.hbond_bridge_top_plot
-            filename = "hbond_bridge_top.png"
-        elif choice.startswith("Comparator"):
-            widget = self.bridge_compare_plot
-            filename = "bridge_comparator.png"
-        elif choice.startswith("Network"):
-            widget = self.hbond_bridge_network_plot
-            filename = "hbond_bridge_network.png"
-        self._export_plot(widget, filename, title="Export H-bond Bridge Plot")
 
     def _export_hydration_plot(self) -> None:
         choice = self.hydration_export_combo.currentText()
@@ -11835,49 +10287,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 Path(path).write_text(updated, encoding="utf-8")
             except Exception:
                 pass
-
-    def _render_widget_emf_native(self, widget: QtWidgets.QWidget, path: str) -> bool:
-        try:
-            printer = QtPrintSupport.QPrinter(QtPrintSupport.QPrinter.PrinterMode.HighResolution)
-            printer.setOutputFormat(QtPrintSupport.QPrinter.OutputFormat.NativeFormat)
-            printer.setOutputFileName(path)
-            if not printer.isValid():
-                return False
-            try:
-                printer.setFullPage(True)
-            except Exception:
-                pass
-            size = widget.size()
-            dpi_x = float(widget.logicalDpiX()) if hasattr(widget, "logicalDpiX") else 96.0
-            dpi_y = float(widget.logicalDpiY()) if hasattr(widget, "logicalDpiY") else 96.0
-            if dpi_x <= 0:
-                dpi_x = 96.0
-            if dpi_y <= 0:
-                dpi_y = 96.0
-            width_in = size.width() / dpi_x
-            height_in = size.height() / dpi_y
-            try:
-                page_size = QtGui.QPageSize(
-                    QtCore.QSizeF(width_in * 72.0, height_in * 72.0),
-                    QtGui.QPageSize.Unit.Point,
-                )
-                printer.setPageSize(page_size)
-            except Exception:
-                pass
-            painter = QtGui.QPainter(printer)
-            if not painter.isActive():
-                return False
-            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
-            widget.render(painter)
-            painter.end()
-            emf_path = Path(path)
-            return emf_path.exists() and emf_path.stat().st_size > 0
-        except Exception as exc:
-            if self.run_logger:
-                self.run_logger.exception("EMF export failed")
-            self.status_bar.showMessage(f"EMF export failed: {exc}", 8000)
-            return False
 
     def _convert_svg_to_emf(self, svg_path: str, emf_path: str) -> bool:
         inkscape = self._find_inkscape()

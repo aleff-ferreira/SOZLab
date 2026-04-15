@@ -8,6 +8,7 @@ import numpy as np
 import MDAnalysis as mda
 from MDAnalysis.lib import distances
 
+from engine.analysis import analysis_frame_indices
 from engine.models import AnalysisOptions, ProjectConfig, SOZNode
 from engine.resolver import resolve_selection
 from engine.solvent import build_solvent, resolve_probe_mode, solvent_positions
@@ -44,7 +45,7 @@ def validate_project(
     context = EvaluationContext(universe=universe, solvent=solvent, selections=resolved_selections)
 
     options: AnalysisOptions = project.analysis
-    frame_indices = list(range(0, len(universe.trajectory), options.stride))[:max_frames]
+    frame_indices = list(analysis_frame_indices(len(universe.trajectory), options))[:max_frames]
 
     results = []
     for soz in project.sozs:
@@ -85,7 +86,7 @@ def _distance_resindices_slow(
     seed_positions: np.ndarray,
     solvent_positions_arr: np.ndarray,
     atom_to_resindex: list[int],
-    cutoff_nm: float,
+    cutoff_ang: float,
     box,
 ) -> set[int]:
     if seed_positions.size == 0 or solvent_positions_arr.size == 0:
@@ -94,7 +95,7 @@ def _distance_resindices_slow(
     if dist.size == 0:
         return set()
     min_dist = np.min(dist, axis=0)
-    solvent_atom_indices = np.where(min_dist <= cutoff_nm)[0]
+    solvent_atom_indices = np.where(min_dist <= cutoff_ang)[0]
     if solvent_atom_indices.size == 0:
         return set()
     resindices: set[int] = set()
@@ -132,29 +133,29 @@ def evaluate_node_slow(node: SOZNode, context: EvaluationContext) -> set[int]:
         cutoff = float(node.params.get("cutoff", 3.5))
         unit = node.params.get("unit", "A")
         atom_mode = node.params.get("probe_mode", node.params.get("atom_mode", "probe"))
-        cutoff_nm = to_internal_length(cutoff, unit)
+        cutoff_ang = to_internal_length(cutoff, unit)
         seed = context.selections[seed_label].group
         mode = resolve_probe_mode(atom_mode, context.solvent.probe.position)
         solvent_pos, atom_map = solvent_positions(context.solvent, mode)
-        return _distance_resindices_slow(seed.positions, solvent_pos, atom_map, cutoff_nm, context.pbc_box)
+        return _distance_resindices_slow(seed.positions, solvent_pos, atom_map, cutoff_ang, context.pbc_box)
 
     if node.type == "shell":
         seed_label = node.params.get("selection_label") or node.params.get("seed_label") or node.params.get("seed")
         cutoffs = node.params.get("cutoffs", [3.5])
         unit = node.params.get("unit", "A")
         atom_mode = node.params.get("probe_mode", node.params.get("atom_mode", "probe"))
-        cutoffs_nm = [to_internal_length(float(value), unit) for value in cutoffs]
+        cutoffs_ang = [to_internal_length(float(value), unit) for value in cutoffs]
         mode = resolve_probe_mode(atom_mode, context.solvent.probe.position)
         seed = context.selections[seed_label].group
         shell_sets: list[set[int]] = []
         current_seed_positions = seed.positions
-        for cutoff_nm in cutoffs_nm:
+        for cutoff_ang in cutoffs_ang:
             solvent_pos, atom_map = solvent_positions(context.solvent, mode)
             resindices = _distance_resindices_slow(
                 current_seed_positions,
                 solvent_pos,
                 atom_map,
-                cutoff_nm,
+                cutoff_ang,
                 context.pbc_box,
             )
             resindices = resindices - set().union(*shell_sets) if shell_sets else resindices

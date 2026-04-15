@@ -18,15 +18,10 @@ class EvaluationContext:
     universe: mda.Universe
     solvent: SolventUniverse
     selections: Dict[str, ResolvedSelection] | None = None
-    seeds: Dict[str, ResolvedSelection] | None = None
 
     def __post_init__(self) -> None:
-        if self.selections is None and self.seeds is not None:
-            self.selections = self.seeds
         if self.selections is None:
             self.selections = {}
-        if self.seeds is None:
-            self.seeds = self.selections
 
     @property
     def pbc_box(self):
@@ -47,6 +42,13 @@ def _resolve_selection_label(node: SOZNode) -> str:
 
 
 def evaluate_node(node: SOZNode, context: EvaluationContext) -> Set[int]:
+    """Evaluate one SOZ logic-tree node and return matching solvent resindices.
+
+    Leaf nodes implement the solvent occupancy zone distance criterion:
+    all solvent residues whose probe atom lies within *cutoff* of any
+    atom in the selection (Lazaridis, J. Phys. Chem. B 102, 1998).
+    Boolean nodes (and/or/not) compose child results via set algebra.
+    """
     if node.type in ("and", "or"):
         if not node.children:
             return set()
@@ -89,13 +91,13 @@ def evaluate_node(node: SOZNode, context: EvaluationContext) -> Set[int]:
         seed = context.selections[selection_label].group
         shell_sets: list[set[int]] = []
         current_seed_positions = seed.positions
-        for cutoff_nm in cutoffs_internal:
+        for cutoff_ang in cutoffs_internal:
             solvent_pos, atom_map = solvent_positions(context.solvent, mode)
             resindices = distance_resindices(
                 current_seed_positions,
                 solvent_pos,
                 atom_map,
-                cutoff_nm,
+                cutoff_ang,
                 context.pbc_box,
             )
             resindices = resindices - set().union(*shell_sets) if shell_sets else resindices

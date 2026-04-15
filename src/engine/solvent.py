@@ -171,16 +171,22 @@ def distance_resindices(
     seed_positions: np.ndarray,
     solvent_positions: np.ndarray,
     atom_map: List[int],
-    cutoff_nm: float,
+    cutoff_ang: float,
     box,
 ) -> set[int]:
+    """Return solvent resindices within *cutoff_ang* of any selection atom.
+
+    Uses MDAnalysis capped_distance (cell-list O(N) neighbor search;
+    Michaud-Agrawal et al., J. Comput. Chem. 32, 2011) with a
+    full distance_array fallback for edge cases (e.g. triclinic boxes).
+    """
     if seed_positions.size == 0 or solvent_positions.size == 0:
         return set()
     try:
         pairs = distances.capped_distance(
             seed_positions,
             solvent_positions,
-            max_cutoff=cutoff_nm,
+            max_cutoff=cutoff_ang,
             box=box,
             return_distances=False,
         )
@@ -220,7 +226,7 @@ def distance_resindices(
         if dist.size == 0:
             return set()
         min_dist = dist.min(axis=0)
-        solvent_atom_indices = np.where(min_dist <= cutoff_nm)[0]
+        solvent_atom_indices = np.where(min_dist <= cutoff_ang)[0]
         if solvent_atom_indices.size == 0:
             return set()
         resindices: set[int] = set()
@@ -233,6 +239,13 @@ def distance_resindices(
 
 
 def build_solvent(universe: mda.Universe, config: SolventConfig) -> SolventUniverse:
+    """Build the solvent universe from topology and config.
+
+    The *probe* is the representative atom (or center) used for all
+    distance calculations — typically water oxygen positions, following
+    the convention in hydration-shell analysis (Impey et al., J. Phys.
+    Chem. 87, 1983).
+    """
     resnames = list(config.water_resnames)
     if config.include_ions:
         resnames += list(config.ion_resnames)
@@ -258,13 +271,8 @@ def build_solvent(universe: mda.Universe, config: SolventConfig) -> SolventUnive
     except Exception as exc:
         raise ValueError(f"Probe selection failed: {exc}") from exc
 
-    n_atoms = len(universe.atoms)
-    index_shift = 0
-    if len(atoms_all) > 0:
-        all_indices = atoms_all.indices
-        if all_indices.size and int(all_indices.min()) >= 1 and int(all_indices.max()) == n_atoms:
-            index_shift = -1
-
+    # Detect whether MDAnalysis uses 0-based or 1-based atom indices
+    # for this topology format, and compute the shift needed to normalize.
     n_atoms = len(universe.atoms)
     index_shift = _best_index_shift(atoms_all.indices, n_atoms)
 

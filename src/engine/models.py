@@ -54,9 +54,6 @@ class SelectionSpec:
         )
 
 
-# Backward-compatible alias
-SeedSpec = SelectionSpec
-
 
 @dataclass
 class ProbeConfig:
@@ -217,106 +214,6 @@ class AnalysisOptions:
             store_ids=bool(data.get("store_ids", True)),
             store_min_distances=bool(data.get("store_min_distances", True)),
             preview_frames=int(data.get("preview_frames", 200)),
-        )
-
-
-@dataclass
-class DistanceBridgeConfig:
-    name: str
-    selection_a: str
-    selection_b: str
-    cutoff_a: float
-    cutoff_b: float
-    unit: str = "A"
-    atom_mode: str = "probe"
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.name,
-            "selection_a": self.selection_a,
-            "selection_b": self.selection_b,
-            "cutoff_a": self.cutoff_a,
-            "cutoff_b": self.cutoff_b,
-            "unit": self.unit,
-            "probe_mode": self.atom_mode,
-            "atom_mode": self.atom_mode,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "DistanceBridgeConfig":
-        mode = data.get("probe_mode", data.get("atom_mode", "probe"))
-        return cls(
-            name=data.get("name", "bridge"),
-            selection_a=data.get("selection_a", data.get("seed_a", "selection_a")),
-            selection_b=data.get("selection_b", data.get("seed_b", "selection_b")),
-            cutoff_a=float(data.get("cutoff_a", 3.5)),
-            cutoff_b=float(data.get("cutoff_b", 3.5)),
-            unit=data.get("unit", "A"),
-            atom_mode=mode,
-        )
-
-    @property
-    def seed_a(self) -> str:
-        return self.selection_a
-
-    @property
-    def seed_b(self) -> str:
-        return self.selection_b
-
-    @seed_a.setter
-    def seed_a(self, value: str) -> None:
-        self.selection_a = value
-
-    @seed_b.setter
-    def seed_b(self, value: str) -> None:
-        self.selection_b = value
-
-
-
-
-@dataclass
-class HbondWaterBridgeConfig:
-    name: str
-    selection_a: str
-    selection_b: str
-    distance: float = 3.0
-    angle: float = 150.0
-    water_selection: Optional[str] = None
-    donors_selection: Optional[str] = None
-    hydrogens_selection: Optional[str] = None
-    acceptors_selection: Optional[str] = None
-    update_selections: bool = True
-    backend: str = "auto"  # "auto", "waterbridge", "hbond_analysis"
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.name,
-            "selection_a": self.selection_a,
-            "selection_b": self.selection_b,
-            "distance": self.distance,
-            "angle": self.angle,
-            "water_selection": self.water_selection,
-            "donors_selection": self.donors_selection,
-            "hydrogens_selection": self.hydrogens_selection,
-            "acceptors_selection": self.acceptors_selection,
-            "update_selections": self.update_selections,
-            "backend": self.backend,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "HbondWaterBridgeConfig":
-        return cls(
-            name=data.get("name", "hbond_bridge"),
-            selection_a=data.get("selection_a", "protein"),
-            selection_b=data.get("selection_b", "protein"),
-            distance=float(data.get("distance", data.get("d_a_cutoff", 3.0))),
-            angle=float(data.get("angle", data.get("d_h_a_angle", 150.0))),
-            water_selection=data.get("water_selection"),
-            donors_selection=data.get("donors_selection", data.get("donors_sel")),
-            hydrogens_selection=data.get("hydrogens_selection", data.get("hydrogens_sel")),
-            acceptors_selection=data.get("acceptors_selection", data.get("acceptors_sel")),
-            update_selections=bool(data.get("update_selections", True)),
-            backend=data.get("backend", "auto"),
         )
 
 
@@ -490,10 +387,6 @@ class WaterDynamicsConfig:
         )
 
 
-# Backwards-compatible aliases
-BridgeConfig = DistanceBridgeConfig
-
-
 
 @dataclass
 class InputConfig:
@@ -585,9 +478,6 @@ class ProjectConfig:
     analysis: AnalysisOptions
     outputs: OutputConfig
     extraction: ExtractionConfig = field(default_factory=ExtractionConfig)
-    distance_bridges: List[DistanceBridgeConfig] = field(default_factory=list)
-    hbond_water_bridges: List[HbondWaterBridgeConfig] = field(default_factory=list)
-
     hbond_hydration: List[HbondHydrationConfig] = field(default_factory=list)
     density_maps: List[DensityMapConfig] = field(default_factory=list)
     water_dynamics: List[WaterDynamicsConfig] = field(default_factory=list)
@@ -603,9 +493,6 @@ class ProjectConfig:
             "analysis": self.analysis.to_dict(),
             "outputs": self.outputs.to_dict(),
             "extraction": self.extraction.to_dict(),
-            "distance_bridges": [bridge.to_dict() for bridge in self.distance_bridges],
-            "hbond_water_bridges": [bridge.to_dict() for bridge in self.hbond_water_bridges],
-
             "hbond_hydration": [cfg.to_dict() for cfg in self.hbond_hydration],
             "density_maps": [cfg.to_dict() for cfg in self.density_maps],
             "water_dynamics": [cfg.to_dict() for cfg in self.water_dynamics],
@@ -621,15 +508,6 @@ class ProjectConfig:
         analysis = AnalysisOptions.from_dict(data.get("analysis", {}))
         outputs = OutputConfig.from_dict(data.get("outputs", {}))
         extraction = ExtractionConfig.from_dict(data.get("extraction", {}))
-        distance_bridges = [
-            DistanceBridgeConfig.from_dict(item)
-            for item in data.get("distance_bridges", data.get("bridges", []))
-        ]
-        hbond_water_bridges = [
-            HbondWaterBridgeConfig.from_dict(item)
-            for item in data.get("hbond_water_bridges", [])
-        ]
-
         hbond_hydration = [
             HbondHydrationConfig.from_dict(item) for item in data.get("hbond_hydration", [])
         ]
@@ -640,47 +518,22 @@ class ProjectConfig:
         return cls(
             inputs=inputs,
             solvent=solvent,
-            selections=_normalize_selection_labels(
-                selections,
-                sozs,
-                distance_bridges,
-                hbond_water_bridges,
-            ),
+            selections=_normalize_selection_labels(selections, sozs),
             sozs=sozs,
             analysis=analysis,
             outputs=outputs,
             extraction=extraction,
-            distance_bridges=distance_bridges,
-            hbond_water_bridges=hbond_water_bridges,
             hbond_hydration=hbond_hydration,
             density_maps=density_maps,
             water_dynamics=water_dynamics,
             version=data.get("version", "1.0"),
         )
 
-    @property
-    def seeds(self) -> Dict[str, SelectionSpec]:
-        return self.selections
-
-    @seeds.setter
-    def seeds(self, value: Dict[str, SelectionSpec]) -> None:
-        self.selections = value
-
-    @property
-    def bridges(self) -> List[DistanceBridgeConfig]:
-        return self.distance_bridges
-
-    @bridges.setter
-    def bridges(self, value: List[DistanceBridgeConfig]) -> None:
-        self.distance_bridges = value
-
 
 
 def _normalize_selection_labels(
     selections: Dict[str, SelectionSpec],
     sozs: List[SOZDefinition],
-    distance_bridges: List[DistanceBridgeConfig],
-    hbond_bridges: List[HbondWaterBridgeConfig],
 ) -> Dict[str, SelectionSpec]:
     mapping = {}
     normalized = {}
@@ -696,16 +549,6 @@ def _normalize_selection_labels(
     if mapping:
         for soz in sozs:
             _rewrite_soz_labels(soz.root, mapping)
-        for bridge in distance_bridges:
-            if bridge.selection_a in mapping:
-                bridge.selection_a = mapping[bridge.selection_a]
-            if bridge.selection_b in mapping:
-                bridge.selection_b = mapping[bridge.selection_b]
-        for bridge in hbond_bridges:
-            if bridge.selection_a in mapping:
-                bridge.selection_a = mapping[bridge.selection_a]
-            if bridge.selection_b in mapping:
-                bridge.selection_b = mapping[bridge.selection_b]
     return normalized
 
 

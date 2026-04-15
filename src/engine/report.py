@@ -57,33 +57,6 @@ def generate_report(result: AnalysisResult, project: ProjectConfig, command_line
             report_lines.append(f"![{name}]({os.path.basename(fig)})")
         report_lines.append("")
 
-    for name, bridge in result.distance_bridge_results.items():
-        report_lines.append(f"## Distance Bridge: {name}")
-        report_lines.append("")
-        fig_paths = _plot_bridge_summary(
-            bridge,
-            report_dir,
-            name,
-            title_prefix="Distance Bridge (distance-cutoff intersection)",
-        )
-        for fig in fig_paths:
-            report_lines.append(f"![{name}]({os.path.basename(fig)})")
-        report_lines.append("")
-
-    for name, bridge in result.hbond_bridge_results.items():
-        report_lines.append(f"## H-bond Water Bridge: {name}")
-        report_lines.append("")
-        fig_paths = _plot_bridge_summary(
-            bridge,
-            report_dir,
-            name,
-            title_prefix="H-bond Water Bridge",
-        )
-        for fig in fig_paths:
-            report_lines.append(f"![{name}]({os.path.basename(fig)})")
-        report_lines.append("")
-
-
     for name, hydration in result.hbond_hydration_results.items():
         report_lines.append(f"## H-bond Hydration: {name}")
         report_lines.append("")
@@ -175,14 +148,41 @@ def _write_html_report(lines: List[str], report_dir: str) -> None:
         handle.write("\n".join(html_lines))
 
 
+def _time_scale_to_ns(time_unit: str) -> float:
+    """Return the factor that converts from the trajectory's native time unit to ns.
+
+    MDAnalysis stores time in ps internally (Michaud-Agrawal et al.,
+    J. Comput. Chem. 32, 2011).  Nanoseconds is the conventional
+    presentation unit for MD timeseries in the literature.
+    """
+    unit = time_unit.lower() if time_unit else "ps"
+    if unit == "ps":
+        return 1e-3
+    if unit == "fs":
+        return 1e-6
+    if unit == "ns":
+        return 1.0
+    # Default: assume ps (MDAnalysis convention)
+    return 1e-3
+
+
 def _plot_soz_summary(soz, report_dir: str, name: str) -> List[str]:
     fig_paths: List[str] = []
     per_frame = soz.per_frame
 
+    # dt: median frame spacing in native trajectory units (typically ps).
+    # scale_to_ns converts to nanoseconds for consistent presentation
+    # with the interactive GUI (Impey et al., J. Phys. Chem. 87, 1983).
+    dt = float(soz.summary.get("dt", 1.0))
+    time_unit = soz.summary.get("time_unit", "ps")
+    scale_to_ns = _time_scale_to_ns(time_unit)
+
     if not per_frame.empty:
+        # Timeseries: n_solvent vs simulation time in ns
+        time_ns = per_frame["time"].to_numpy(dtype=float) * scale_to_ns
         fig, ax = plt.subplots(figsize=(8, 3))
-        ax.plot(per_frame["time"], per_frame["n_solvent"], color="#2b6cb0")
-        ax.set_xlabel("Time (ps)")
+        ax.plot(time_ns, per_frame["n_solvent"], color="#2b6cb0")
+        ax.set_xlabel("Time (ns)")
         ax.set_ylabel("N solvent")
         ax.set_title(f"{name}: n_solvent vs time")
         fig.tight_layout()
@@ -216,17 +216,19 @@ def _plot_soz_summary(soz, report_dir: str, name: str) -> List[str]:
         plt.close(fig)
         fig_paths.append(path)
 
+    # Residence survival: complementary CDF of continuous residence durations.
+    # Segment lengths (in frames) are converted to ns via dt * scale_to_ns
+    # (Laage & Hynes, Science 311, 2006; Impey et al., J. Phys. Chem. 87, 1983).
     durations = []
-    dt = float(soz.summary.get("dt", 1.0))
     for lengths in soz.residence_cont.values():
-        durations.extend([length * dt for length in lengths])
+        durations.extend([length * dt * scale_to_ns for length in lengths])
     if durations:
         durations = np.array(durations, dtype=float)
         durations.sort()
         survival = 1.0 - np.arange(1, len(durations) + 1) / len(durations)
         fig, ax = plt.subplots(figsize=(4, 3))
         ax.step(durations, survival, where="post", color="#805ad5")
-        ax.set_xlabel("Residence (time)")
+        ax.set_xlabel("Residence Time (ns)")
         ax.set_ylabel("Survival")
         ax.set_title(f"{name}: residence survival")
         fig.tight_layout()
@@ -235,56 +237,6 @@ def _plot_soz_summary(soz, report_dir: str, name: str) -> List[str]:
         plt.close(fig)
         fig_paths.append(path)
 
-    return fig_paths
-
-
-def _plot_bridge_summary(bridge, report_dir: str, name: str, title_prefix: str) -> List[str]:
-    fig_paths: List[str] = []
-    per_frame = bridge.per_frame
-    if not per_frame.empty:
-        fig, ax = plt.subplots(figsize=(8, 3))
-        ax.plot(per_frame["time"], per_frame["n_solvent"], color="#2b6cb0")
-        ax.set_xlabel("Time (ps)")
-        ax.set_ylabel("Bridging solvent count")
-        ax.set_title(f"{title_prefix}: # bridging solvents")
-        fig.tight_layout()
-        path = os.path.join(report_dir, f"{name}_bridge_timeseries.png")
-        fig.savefig(path, dpi=200)
-        plt.close(fig)
-        fig_paths.append(path)
-
-    per_solvent = bridge.per_solvent
-    if not per_solvent.empty:
-        top = per_solvent.head(10)
-        fig, ax = plt.subplots(figsize=(6, 3))
-        ax.barh(top["solvent_id"], top["occupancy_pct"], color="#dd6b20")
-        ax.set_xlabel("Occupancy %")
-        ax.set_title(f"{title_prefix}: top bridges")
-        ax.invert_yaxis()
-        fig.tight_layout()
-        path = os.path.join(report_dir, f"{name}_bridge_top.png")
-        fig.savefig(path, dpi=200)
-        plt.close(fig)
-        fig_paths.append(path)
-
-    durations = []
-    dt = float(bridge.summary.get("dt", 1.0))
-    for lengths in bridge.residence_cont.values():
-        durations.extend([length * dt for length in lengths])
-    if durations:
-        durations = np.array(durations, dtype=float)
-        durations.sort()
-        survival = 1.0 - np.arange(1, len(durations) + 1) / len(durations)
-        fig, ax = plt.subplots(figsize=(4, 3))
-        ax.step(durations, survival, where="post", color="#805ad5")
-        ax.set_xlabel("Residence (time)")
-        ax.set_ylabel("Survival")
-        ax.set_title(f"{title_prefix}: residence survival")
-        fig.tight_layout()
-        path = os.path.join(report_dir, f"{name}_bridge_residence.png")
-        fig.savefig(path, dpi=200)
-        plt.close(fig)
-        fig_paths.append(path)
     return fig_paths
 
 

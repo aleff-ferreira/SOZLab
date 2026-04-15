@@ -30,14 +30,16 @@ def compute_wor_fallback(u: mda.Universe, selection: str, options) -> Optional[p
     if len(u.trajectory) > 1:
         dt = u.trajectory.dt
     
-    n_frames = len(range(options.frame_start, options.frame_stop, options.stride))
+    # frame_stop may be None (meaning "all frames"); coalesce for range().
+    stop = options.frame_stop if options.frame_stop is not None else len(u.trajectory)
+    n_frames = len(range(options.frame_start, stop, options.stride))
     if n_frames < 2:
         return None
-        
+
     all_vectors = []
     times = []
-    
-    for ts in u.trajectory[options.frame_start:options.frame_stop:options.stride]:
+
+    for ts in u.trajectory[options.frame_start:stop:options.stride]:
         # Get all vectors for this frame
         pos = u.atoms.positions
         vecs = []

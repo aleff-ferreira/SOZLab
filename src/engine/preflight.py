@@ -15,9 +15,6 @@ from engine.models import (
     ProjectConfig,
     SelectionSpec,
     SOZNode,
-    DistanceBridgeConfig,
-
-    HbondWaterBridgeConfig,
     HbondHydrationConfig,
     DensityMapConfig,
     WaterDynamicsConfig,
@@ -27,6 +24,21 @@ from engine.units import to_internal_length
 from engine.resolver import sanitize_selection_string
 
 logger = logging.getLogger("sozlab")
+
+
+def density_conditioning_issue(cfg: DensityMapConfig) -> str | None:
+    """Return a user-visible density conditioning issue, if one is known."""
+    policy = getattr(cfg, "conditioning_policy", "strict")
+    if not cfg.align and policy != "unsafe":
+        # Solvent density maps must be accumulated after removing overall roto-translation;
+        # otherwise protein drift smears hydration hotspots (MDAnalysis AlignTraj; Cavalli
+        # et al., BMC Genomics 2017, solvent-density analysis after superposition).
+        return (
+            f"Density map '{cfg.name}' requested without alignment. "
+            "This is scientifically unsafe for solvent density."
+        )
+    return None
+
 
 
 @dataclass
@@ -69,13 +81,6 @@ class PreflightReport:
             "gmx_summary": self.gmx_summary,
         }
 
-    @property
-    def seed_checks(self) -> Dict[str, "SelectionCheck"]:
-        return self.selection_checks
-
-    @seed_checks.setter
-    def seed_checks(self, value: Dict[str, "SelectionCheck"]) -> None:
-        self.selection_checks = value
 
 
 def _selection_check_to_dict(check: SelectionCheck) -> Dict[str, object]:
@@ -576,87 +581,6 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
         _check_node_units(soz.root, errors)
         _check_node_modes(soz.root, errors)
 
-    for bridge in project.distance_bridges:
-        try:
-            to_internal_length(1.0, bridge.unit)
-        except Exception:
-            errors.append(
-                f"Unsupported unit '{bridge.unit}' in distance bridge '{bridge.name}'."
-            )
-        try:
-            resolve_probe_mode(bridge.atom_mode, project.solvent.probe.position)
-        except Exception as exc:
-            errors.append(
-                f"Unsupported probe mode '{bridge.atom_mode}' in distance bridge '{bridge.name}': {exc}"
-            )
-        if bridge.selection_a not in project.selections:
-            errors.append(
-                f"Distance bridge '{bridge.name}' selection_a '{bridge.selection_a}' not found in selections."
-            )
-        if bridge.selection_b not in project.selections:
-            errors.append(
-                f"Distance bridge '{bridge.name}' selection_b '{bridge.selection_b}' not found in selections."
-            )
-
-    for bridge in project.hbond_water_bridges:
-        for label_name, selection_value in (
-            ("selection_a", bridge.selection_a),
-            ("selection_b", bridge.selection_b),
-        ):
-            if selection_value in project.selections:
-                continue
-            sel_check = _check_selection_string(
-                universe,
-                selection_value,
-                f"hbond_water_bridge:{bridge.name}:{label_name}",
-            )
-            if sel_check.count == 0:
-                errors.append(
-                    f"H-bond water bridge '{bridge.name}' {label_name} '{selection_value}' resolved to 0 atoms."
-                )
-                if sel_check.suggestions:
-                    warnings.append("  Suggestions: " + " | ".join(sel_check.suggestions[:3]))
-            else:
-                warnings.append(
-                    f"H-bond water bridge '{bridge.name}' {label_name} uses a raw selection string "
-                    "(not a saved selection label)."
-                )
-        if bridge.distance <= 0:
-            errors.append(
-                f"H-bond water bridge '{bridge.name}' distance must be positive."
-            )
-        if bridge.angle <= 0:
-            errors.append(f"H-bond water bridge '{bridge.name}' angle must be positive.")
-        if bridge.water_selection:
-            sel_check = _check_selection_string(
-                universe, bridge.water_selection, f"hbond_water_bridge:{bridge.name}:water"
-            )
-            if sel_check.count == 0:
-                warnings.append(
-                    f"H-bond water bridge '{bridge.name}' water_selection resolved to 0 atoms."
-                )
-                if sel_check.suggestions:
-                    warnings.append("  Suggestions: " + " | ".join(sel_check.suggestions[:3]))
-        for label, sel in [
-            ("donors", bridge.donors_selection),
-            ("hydrogens", bridge.hydrogens_selection),
-            ("acceptors", bridge.acceptors_selection),
-        ]:
-            if sel:
-                sel_check = _check_selection_string(
-                    universe, sel, f"hbond_water_bridge:{bridge.name}:{label}"
-                )
-                if sel_check.count == 0:
-                    warnings.append(
-                        f"H-bond water bridge '{bridge.name}' {label}_selection resolved to 0 atoms."
-                    )
-                    if sel_check.suggestions:
-                        warnings.append(
-                            "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
-                        )
-
-
-
     for cfg in project.hbond_hydration:
         if cfg.conditioning not in ("soz", "all"):
             errors.append(
@@ -700,12 +624,21 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
                         )
 
     for cfg in project.density_maps:
+        policy = getattr(cfg, "conditioning_policy", "strict")
         if cfg.grid_spacing <= 0:
             errors.append(
                 f"Density map '{cfg.name}' grid_spacing must be positive."
             )
         if cfg.stride <= 0:
             errors.append(f"Density map '{cfg.name}' stride must be positive.")
+        density_issue = density_conditioning_issue(cfg)
+        if density_issue is not None:
+            # Fail fast in Project Doctor / CLI validate so a strict density run cannot
+            # appear successful while silently omitting the requested map.
+            if policy == "strict":
+                errors.append(density_issue)
+            else:
+                warnings.append(density_issue)
         if not cfg.selection:
             errors.append(f"Density map '{cfg.name}' selection is empty.")
         else:
@@ -720,6 +653,31 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
                     warnings.append(
                         "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
                     )
+            elif sel_check.count > 0:
+                # Cross-validate: in a solvent analysis context, density maps
+                # typically target solvent species.  Warn if the species_selection
+                # selects zero solvent atoms, which likely indicates a
+                # misconfigured atom name (e.g. "name O" vs "name OH2" in CHARMM).
+                # Ref: Nguyen et al., JCTC 8 (2012); MDAnalysis density tutorial.
+                try:
+                    selected_atoms = universe.select_atoms(cfg.selection)
+                    solvent_resname_set = set(solvent_cfg.water_resnames)
+                    solvent_atom_count = sum(
+                        1 for a in selected_atoms if a.residue.resname in solvent_resname_set
+                    )
+                    if solvent_atom_count == 0:
+                        probe_sel = solvent_cfg.probe.selection
+                        warnings.append(
+                            f"Density map '{cfg.name}' species_selection '{cfg.selection}' "
+                            f"matched {sel_check.count} atoms but none belong to solvent "
+                            f"residues ({', '.join(solvent_cfg.water_resnames)}). "
+                            f"If you intended a solvent density map, consider using "
+                            f"the probe selection '{probe_sel}' restricted to solvent "
+                            f"residues, e.g. "
+                            f"'resname {' '.join(solvent_matches)} and {probe_sel}'."
+                        )
+                except Exception:
+                    pass
         if cfg.align and not cfg.align_selection:
             errors.append(
                 f"Density map '{cfg.name}' align_selection required when alignment is enabled."
@@ -797,11 +755,6 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
     required_modes: set[str] = set()
     for soz in project.sozs:
         _collect_node_modes(soz.root, required_modes)
-    for bridge in project.distance_bridges:
-        try:
-            required_modes.add(resolve_probe_mode(bridge.atom_mode, project.solvent.probe.position))
-        except Exception:
-            pass
 
     for cfg in project.water_dynamics:
         if cfg.region_mode == "selection":

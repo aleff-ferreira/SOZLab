@@ -19,9 +19,6 @@ from MDAnalysis.lib import distances
 
 from engine.models import (
     AnalysisOptions,
-
-    DistanceBridgeConfig,
-    HbondWaterBridgeConfig,
     HbondHydrationConfig,
     DensityMapConfig,
     WaterDynamicsConfig,
@@ -41,7 +38,7 @@ from engine.solvent import (
 from engine.soz_eval import EvaluationContext, evaluate_node
 from engine.stats import StatsAccumulator, compute_residence_lengths
 from engine.units import to_internal_length
-from engine.preflight import run_preflight
+from engine.preflight import density_conditioning_issue, run_preflight
 
 try:
     import yaml
@@ -154,6 +151,17 @@ def resolve_worker_count(workers: int | None) -> int:
     return max(1, min(workers_i, cpu_total))
 
 
+def analysis_frame_indices(n_frames: int, options: AnalysisOptions) -> range:
+    """Return the trajectory[start:stop:step] window used by SOZLab analyses."""
+    if options.stride <= 0:
+        raise ValueError("Frame stride must be positive")
+    # Match MDAnalysis AnalysisBase.run(start, stop, step) slicing semantics so
+    # validate() audits the exact same frames that run() will analyze.
+    start = max(int(options.frame_start), 0)
+    stop = n_frames if options.frame_stop is None else min(int(options.frame_stop), n_frames)
+    return range(start, stop, int(options.stride))
+
+
 def _load_universe_from_inputs(inputs: InputConfig) -> mda.Universe:
     if inputs.trajectory:
         return mda.Universe(inputs.topology, inputs.trajectory)
@@ -183,36 +191,6 @@ def _chunk_configs(configs: List[object], n_chunks: int) -> List[List[object]]:
     n_chunks = max(1, min(n_chunks, len(configs)))
     chunk_size = max(1, int(np.ceil(len(configs) / n_chunks)))
     return [configs[i : i + chunk_size] for i in range(0, len(configs), chunk_size)]
-
-
-def _run_hbond_bridge_chunk(
-    inputs_data: Dict[str, object],
-    solvent_data: Dict[str, object],
-    bridge_configs_data: List[Dict[str, object]],
-    frame_indices: List[int],
-    frame_times: List[float],
-    frame_index_map: Dict[int, int],
-    options_data: Dict[str, object],
-    water_resnames: List[str],
-    store_frame_table: bool,
-    selection_lookup: Dict[str, str] | None,
-) -> tuple[Dict[str, BridgeResult], List[str]]:
-    universe, solvent = _prepare_worker_context(inputs_data, solvent_data)
-    configs = [HbondWaterBridgeConfig.from_dict(cfg) for cfg in bridge_configs_data]
-    options = AnalysisOptions.from_dict(options_data)
-    return _run_hbond_water_bridges(
-        universe=universe,
-        solvent=solvent,
-        bridge_configs=configs,
-        frame_indices=frame_indices,
-        frame_times=frame_times,
-        frame_index_map=frame_index_map,
-        options=options,
-        water_resnames=water_resnames,
-        store_frame_table=store_frame_table,
-        selection_lookup=selection_lookup,
-        logger=None,
-    )
 
 
 def _run_hbond_hydration_chunk(
@@ -254,11 +232,6 @@ class SOZFrameData:
 
 
 @dataclass
-class BridgeFrameData:
-    accumulator: StatsAccumulator
-
-
-@dataclass
 class HydrationResult:
     name: str
     table: pd.DataFrame
@@ -276,20 +249,11 @@ class SOZResult:
     per_frame: pd.DataFrame
     per_solvent: pd.DataFrame
     min_distance_traces: Optional[pd.DataFrame]
-    residence_cont: Dict[int, List[float]]
-    residence_inter: Dict[int, List[float]]
-
-
-@dataclass
-class BridgeResult:
-    name: str
-    per_frame: pd.DataFrame
-    per_solvent: pd.DataFrame
-    bridge_type: str
-    summary: Dict[str, object]
+    # Frame counts per continuous/intermittent residence segment.
+    # Each value is a list of segment lengths in frames (int), not time.
+    # Multiply by dt (from summary["dt"]) to convert to time units.
     residence_cont: Dict[int, List[int]]
     residence_inter: Dict[int, List[int]]
-    edge_list: Optional[pd.DataFrame] = None
 
 
 @dataclass
@@ -317,8 +281,6 @@ class WaterDynamicsResult:
 @dataclass
 class AnalysisResult:
     soz_results: Dict[str, SOZResult]
-    distance_bridge_results: Dict[str, BridgeResult]
-    hbond_bridge_results: Dict[str, BridgeResult]
     hbond_hydration_results: Dict[str, HydrationResult]
     density_results: Dict[str, DensityMapResult]
     water_dynamics_results: Dict[str, WaterDynamicsResult]
@@ -372,12 +334,7 @@ class SOZAnalysisEngine:
         return resolved
 
     def _frame_indices(self, n_frames: int, options: AnalysisOptions) -> range:
-        if options.stride <= 0:
-            raise ValueError("Frame stride must be positive")
-        start = max(options.frame_start, 0)
-        stop = options.frame_stop if options.frame_stop is not None else n_frames
-        stop = min(stop, n_frames)
-        return range(start, stop, options.stride)
+        return analysis_frame_indices(n_frames, options)
 
     def run(
         self,
@@ -452,8 +409,6 @@ class SOZAnalysisEngine:
         progress_units = 0
         if progress:
             optional_units = 0
-            if self.project.hbond_water_bridges:
-                optional_units += 1
             if self.project.hbond_hydration:
                 optional_units += 1
             if self.project.density_maps:
@@ -502,19 +457,6 @@ class SOZAnalysisEngine:
                 frame_labels=[],
                 min_distances=[],
             )
-
-        distance_bridge_frame_data: Dict[str, BridgeFrameData] = {}
-        for bridge in self.project.distance_bridges:
-            distance_bridge_frame_data[bridge.name] = BridgeFrameData(
-                accumulator=StatsAccumulator(
-                    solvent_records=solvent.record_by_resindex,
-                    gap_tolerance=options.gap_tolerance,
-                    frame_stride=options.stride,
-                    store_ids=options.store_ids,
-                    store_frame_table=self.project.outputs.write_per_frame,
-                )
-            )
-
 
         hbond_hydration_configs = self.project.hbond_hydration
         hbond_hydration_frames_total: Dict[str, Dict[int, List[int]]] = {
@@ -617,29 +559,19 @@ class SOZAnalysisEngine:
                 if soz.name in soz_frames_for_hbond:
                     soz_frames_for_hbond[soz.name].append(set(frame_set))
 
-            for bridge in self.project.distance_bridges:
-                bridge_set = _bridge_frame_set(bridge, context, solvent)
-                distance_bridge_frame_data[bridge.name].accumulator.update(
-                    sample_index,
-                    float(ts.time),
-                    bridge_set,
-                    frame_label=frame_index,
-                )
-
-
             for cfg in water_dynamics_selection_configs:
                 region_group = water_dynamics_region_groups.get(cfg.name)
                 if region_group is None or len(region_group) == 0:
                     water_dynamics_frame_sets[cfg.name].append(set())
                     continue
                 mode = resolve_probe_mode(cfg.region_probe_mode, solvent.probe.position)
-                cutoff_nm = to_internal_length(cfg.region_cutoff, cfg.region_unit)
+                cutoff_ang = to_internal_length(cfg.region_cutoff, cfg.region_unit)
                 solvent_pos, atom_map = solvent_positions(solvent, mode)
                 region_set = distance_resindices(
                     region_group.positions,
                     solvent_pos,
                     atom_map,
-                    cutoff_nm,
+                    cutoff_ang,
                     context.pbc_box,
                 )
                 water_dynamics_frame_sets[cfg.name].append(region_set)
@@ -647,19 +579,19 @@ class SOZAnalysisEngine:
             for cfg in water_dynamics_soz_configs:
                 soz_set = frame_sets_current.get(cfg.soz_name or "", set())
                 final_set = soz_set
-                
+
                 # Apply optional distance cutoff (intersect SOZ with shell around solute)
                 if cfg.region_cutoff > 0 and cfg.name in water_dynamics_solute_groups:
                     solute_group = water_dynamics_solute_groups[cfg.name]
                     if len(solute_group) > 0:
                         mode = resolve_probe_mode(cfg.region_probe_mode, solvent.probe.position)
-                        cutoff_nm = to_internal_length(cfg.region_cutoff, cfg.region_unit)
+                        cutoff_ang = to_internal_length(cfg.region_cutoff, cfg.region_unit)
                         solvent_pos, atom_map = solvent_positions(solvent, mode)
                         shell_set = distance_resindices(
                             solute_group.positions,
                             solvent_pos,
                             atom_map,
-                            cutoff_nm,
+                            cutoff_ang,
                             context.pbc_box,
                         )
                         final_set = soz_set & shell_set
@@ -722,23 +654,6 @@ class SOZAnalysisEngine:
                     float(summary.get("mean_n_solvent", 0.0)),
                 )
 
-        distance_bridge_results: Dict[str, BridgeResult] = {}
-        for bridge in self.project.distance_bridges:
-            stats = distance_bridge_frame_data[bridge.name].accumulator.finalize()
-            distance_bridge_results[bridge.name] = BridgeResult(
-                name=bridge.name,
-                per_frame=stats["per_frame"],
-                per_solvent=stats["per_solvent"],
-                bridge_type="distance",
-                summary=stats["summary"],
-                residence_cont=stats["residence_cont"],
-                residence_inter=stats["residence_inter"],
-            )
-            if logger:
-                logger.info(
-                    "Distance bridge %s: %d frames", bridge.name, len(stats["per_frame"])
-                )
-
         if progress_total is not None and _emit_progress is not None:
             progress_units += 1
             _emit_progress("Derived metrics")
@@ -747,82 +662,6 @@ class SOZAnalysisEngine:
         solvent_payload = self.project.solvent.to_dict()
         options_payload = options.to_dict()
         water_resnames = list(self.project.solvent.water_resnames)
-
-        hbond_bridge_configs = self.project.hbond_water_bridges
-        if hbond_bridge_configs and logger:
-            logger.info("Starting H-bond water bridge analysis...")
-        if hbond_bridge_configs and workers > 1 and len(hbond_bridge_configs) > 1:
-            hbond_bridge_results = {}
-            hbond_bridge_warnings = []
-            chunks = _chunk_configs([cfg.to_dict() for cfg in hbond_bridge_configs], workers)
-            try:
-                max_workers = min(workers, len(chunks))
-                ctx = multiprocessing.get_context("spawn")
-                with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
-                    futures = [
-                        executor.submit(
-                            _run_hbond_bridge_chunk,
-                            inputs_payload,
-                            solvent_payload,
-                            chunk,
-                            frame_labels,
-                            frame_times,
-                            frame_index_map,
-                            options_payload,
-                            water_resnames,
-                            self.project.outputs.write_per_frame,
-                            resolved_selection_strings,
-                        )
-                        for chunk in chunks
-                    ]
-                    for future in concurrent.futures.as_completed(futures):
-                        results_chunk, warnings_chunk = future.result()
-                        hbond_bridge_results.update(results_chunk)
-                        if warnings_chunk:
-                            hbond_bridge_warnings.extend(warnings_chunk)
-                hbond_bridge_results = {
-                    cfg.name: hbond_bridge_results[cfg.name]
-                    for cfg in hbond_bridge_configs
-                    if cfg.name in hbond_bridge_results
-                }
-            except Exception as exc:
-                msg = f"H-bond water bridge parallel execution failed; running sequentially. ({exc})"
-                warnings.append(msg)
-                if logger:
-                    logger.warning(msg)
-                hbond_bridge_results, hbond_bridge_warnings = _run_hbond_water_bridges(
-                    universe=universe,
-                    solvent=solvent,
-                    bridge_configs=hbond_bridge_configs,
-                    frame_indices=frame_labels,
-                    frame_times=frame_times,
-                    frame_index_map=frame_index_map,
-                    options=options,
-                    water_resnames=water_resnames,
-                    store_frame_table=self.project.outputs.write_per_frame,
-                    selection_lookup=resolved_selection_strings,
-                    logger=logger,
-                )
-        else:
-            hbond_bridge_results, hbond_bridge_warnings = _run_hbond_water_bridges(
-                universe=universe,
-                solvent=solvent,
-                bridge_configs=hbond_bridge_configs,
-                frame_indices=frame_labels,
-                frame_times=frame_times,
-                frame_index_map=frame_index_map,
-                options=options,
-                water_resnames=water_resnames,
-                store_frame_table=self.project.outputs.write_per_frame,
-                selection_lookup=resolved_selection_strings,
-                logger=logger,
-            )
-        if hbond_bridge_warnings:
-            warnings.extend(hbond_bridge_warnings)
-        if progress_total is not None and _emit_progress is not None and self.project.hbond_water_bridges:
-            progress_units += 1
-            _emit_progress("H-bond water bridges")
-
 
         if hbond_hydration_configs and logger:
             logger.info("Starting H-bond hydration analysis...")
@@ -992,10 +831,12 @@ class SOZAnalysisEngine:
             progress_units += 1
             _emit_progress("Water dynamics")
 
+        # Epsilon comparison avoids IEEE 754 false negatives for values
+        # near zero (Goldberg, ACM Computing Surveys 23, 1991).
         zero_occupancy = [
             name
             for name, soz in soz_results.items()
-            if float(soz.summary.get("occupancy_fraction", 0.0)) == 0.0
+            if float(soz.summary.get("occupancy_fraction", 0.0)) < 1e-9
         ]
         zero_diagnostics: Dict[str, List[str]] = {}
         if zero_occupancy:
@@ -1058,39 +899,6 @@ class SOZAnalysisEngine:
             for soz in self.project.sozs
         }
 
-        distance_bridge_definitions = {
-            bridge.name: {
-                "selection_a": bridge.selection_a,
-                "selection_b": bridge.selection_b,
-                "probe_mode": resolve_probe_mode(bridge.atom_mode, solvent.probe.position),
-                "cutoff_a": bridge.cutoff_a,
-                "cutoff_b": bridge.cutoff_b,
-                "unit": bridge.unit,
-                "cutoff_a_nm": to_internal_length(bridge.cutoff_a, bridge.unit),
-                "cutoff_b_nm": to_internal_length(bridge.cutoff_b, bridge.unit),
-                "type": "distance_bridge",
-            }
-            for bridge in self.project.distance_bridges
-        }
-
-        hbond_bridge_definitions = {
-            bridge.name: {
-                "selection_a": bridge.selection_a,
-                "selection_b": bridge.selection_b,
-                "distance": bridge.distance,
-                "angle": bridge.angle,
-                "water_selection": bridge.water_selection,
-                "donors_selection": bridge.donors_selection,
-                "hydrogens_selection": bridge.hydrogens_selection,
-                "acceptors_selection": bridge.acceptors_selection,
-                "update_selections": bridge.update_selections,
-                "type": "hbond_water_bridge",
-            }
-            for bridge in self.project.hbond_water_bridges
-        }
-
-
-
         hbond_hydration_definitions = {
             cfg.name: {
                 "residue_selection": cfg.residue_selection,
@@ -1131,9 +939,6 @@ class SOZAnalysisEngine:
             "probe_definition": probe_summary,
             "resolved_selections": resolved_selection_info,
             "soz_definitions": soz_definitions,
-            "distance_bridge_definitions": distance_bridge_definitions,
-            "hbond_bridge_definitions": hbond_bridge_definitions,
-
             "hbond_hydration_definitions": hbond_hydration_definitions,
             "density_definitions": density_definitions,
             "water_dynamics_definitions": water_dynamics_definitions,
@@ -1145,8 +950,6 @@ class SOZAnalysisEngine:
 
         return AnalysisResult(
             soz_results=soz_results,
-            distance_bridge_results=distance_bridge_results,
-            hbond_bridge_results=hbond_bridge_results,
             hbond_hydration_results=hbond_hydration_results,
             density_results=density_results,
             water_dynamics_results=water_dynamics_results,
@@ -1187,31 +990,6 @@ def _min_distance_dataframe(
     return pd.DataFrame(rows)
 
 
-def _bridge_frame_set(
-    bridge: DistanceBridgeConfig,
-    context: EvaluationContext,
-    solvent: SolventUniverse,
-) -> set[int]:
-    sel_a = context.selections.get(bridge.selection_a)
-    sel_b = context.selections.get(bridge.selection_b)
-    if sel_a is None or sel_b is None:
-        return set()
-    selection_a = sel_a.group
-    selection_b = sel_b.group
-    cutoff_a_nm = to_internal_length(bridge.cutoff_a, bridge.unit)
-    cutoff_b_nm = to_internal_length(bridge.cutoff_b, bridge.unit)
-
-    mode = resolve_probe_mode(bridge.atom_mode, solvent.probe.position)
-    solvent_pos, atom_map = solvent_positions(solvent, mode)
-    set_a = distance_resindices(
-        selection_a.positions, solvent_pos, atom_map, cutoff_a_nm, context.pbc_box
-    )
-    set_b = distance_resindices(
-        selection_b.positions, solvent_pos, atom_map, cutoff_b_nm, context.pbc_box
-    )
-    return set_a & set_b
-
-
 def _collect_probe_modes(node: SOZNode, default_position: str) -> set[str]:
     modes: set[str] = set()
     if node.type in ("distance", "shell"):
@@ -1247,11 +1025,11 @@ def _node_qc_entries(node: SOZNode, default_position: str) -> List[Dict[str, obj
         if node.type == "distance":
             cutoff = float(node.params.get("cutoff", 3.5))
             entry["cutoff"] = cutoff
-            entry["cutoff_nm"] = to_internal_length(cutoff, unit)
+            entry["cutoff_angstrom"] = to_internal_length(cutoff, unit)
         else:
             cutoffs = [float(val) for val in node.params.get("cutoffs", [3.5])]
             entry["cutoffs"] = cutoffs
-            entry["cutoffs_nm"] = [to_internal_length(val, unit) for val in cutoffs]
+            entry["cutoffs_angstrom"] = [to_internal_length(val, unit) for val in cutoffs]
         entries.append(entry)
     for child in node.children:
         entries.extend(_node_qc_entries(child, default_position))
@@ -1325,11 +1103,11 @@ def _residue_contact_indices(
     solvent_pos, _ = solvent_positions(solvent, mode, resindices=resindices)
     if solvent_pos.size == 0:
         return set()
-    cutoff_nm = to_internal_length(cutoff, unit)
+    cutoff_ang = to_internal_length(cutoff, unit)
     pairs = distances.capped_distance(
         residues.atoms.positions,
         solvent_pos,
-        max_cutoff=cutoff_nm,
+        max_cutoff=cutoff_ang,
         box=box,
         return_distances=False,
     )
@@ -1542,328 +1320,6 @@ def _init_hbond_analysis(
     return cls(universe, **kwargs)
 
 
-def _hbonds_to_water_sets(
-    hbonds: np.ndarray,
-    universe: mda.Universe,
-    water_resindices: set[int],
-    frame_index_map: Dict[int, int],
-) -> Dict[int, set[int]]:
-    sets_by_frame: Dict[int, set[int]] = {}
-    if hbonds.size == 0:
-        return sets_by_frame
-    n_atoms = len(universe.atoms)
-    n_frames = len(frame_index_map)
-    frames = hbonds[:, 0].astype(int)
-    donor_idx = _normalize_atom_indices(hbonds[:, 1], n_atoms)
-    acceptor_idx = _normalize_atom_indices(hbonds[:, 3], n_atoms)
-    if donor_idx.size == 0 or acceptor_idx.size == 0:
-        return sets_by_frame
-    valid_len = min(len(frames), len(donor_idx), len(acceptor_idx))
-    frames = frames[:valid_len]
-    donor_idx = donor_idx[:valid_len]
-    acceptor_idx = acceptor_idx[:valid_len]
-    atoms = universe.atoms
-    for frame, donor, acceptor in zip(frames, donor_idx, acceptor_idx):
-        sample_idx = _map_frame_index(int(frame), frame_index_map, n_frames)
-        if sample_idx is None:
-            continue
-        donor_res = int(atoms[int(donor)].resindex)
-        acceptor_res = int(atoms[int(acceptor)].resindex)
-        water_res = None
-        if donor_res in water_resindices:
-            water_res = donor_res
-        elif acceptor_res in water_resindices:
-            water_res = acceptor_res
-        if water_res is None:
-            continue
-        sets_by_frame.setdefault(sample_idx, set()).add(water_res)
-    return sets_by_frame
-
-
-
-def _resolve_hbond_bridge_backend(
-    cfg: HbondWaterBridgeConfig,
-    logger: Optional[logging.Logger] = None,
-) -> tuple[Any, str, Optional[str]]:
-    """
-    Resolve the WaterBridgeAnalysis backend class based on config.
-    Returns: (backend_cls, backend_type, error_message)
-    backend_type is "waterbridge" or "hbond".
-    """
-    
-    # helper to try import
-    def try_import():
-        try:
-            from MDAnalysis.analysis.hydrogenbonds import WaterBridgeAnalysis
-            return WaterBridgeAnalysis, None
-        except ImportError:
-            return None, "WaterBridgeAnalysis not found in MDAnalysis.analysis.hydrogenbonds"
-        except Exception as e:
-            return None, str(e)
-
-    if cfg.backend == "waterbridge":
-        cls, err = try_import()
-        if cls:
-            return cls, "waterbridge", None
-        else:
-            return None, "waterbridge", f"Explicit WaterBridgeAnalysis backend failed: {err}"
-    
-    elif cfg.backend == "hbond_analysis":
-        return None, "hbond", None
-    
-    else: # auto
-        cls, err = try_import()
-        if cls:
-             return cls, "waterbridge", None
-        else:
-             if logger:
-                 logger.info(f"WaterBridgeAnalysis unavailable (auto mode): {err}. Using fallback.")
-             return None, "hbond", None
-
-
-def _run_hbond_water_bridges(
-    universe: mda.Universe,
-    solvent: SolventUniverse,
-    bridge_configs: List[HbondWaterBridgeConfig],
-    frame_indices: List[int],
-    frame_times: List[float],
-    frame_index_map: Dict[int, int],
-    options: AnalysisOptions,
-    water_resnames: List[str],
-    store_frame_table: bool,
-    selection_lookup: Dict[str, str] | None,
-    logger: Optional[logging.Logger],
-) -> tuple[Dict[str, BridgeResult], List[str]]:
-    results: Dict[str, BridgeResult] = {}
-    warnings_list: List[str] = []
-    if not bridge_configs:
-        return results, warnings_list
-
-    # Removed top-level import check to avoid premature warnings.
-    # Backend resolution is now handled per-config in the loop.
-
-    default_water_selection = _default_water_selection(water_resnames)
-    start = frame_indices[0] if frame_indices else 0
-    stop = (frame_indices[-1] + 1) if frame_indices else None
-    step = options.stride
-
-    for cfg in bridge_configs:
-        if logger:
-            logger.info("Processing H-bond water bridge: %s...", cfg.name)
-        water_sel = cfg.water_selection or default_water_selection
-        sel_a = selection_lookup.get(cfg.selection_a, cfg.selection_a) if selection_lookup else cfg.selection_a
-        sel_b = selection_lookup.get(cfg.selection_b, cfg.selection_b) if selection_lookup else cfg.selection_b
-        hbonds = None
-        notes: List[str] = []
-        
-
-
-        use_waterbridge = False
-        waterbridge_class = None
-        
-        # Centralized resolution
-        wb_cls, backend_type, wb_err = _resolve_hbond_bridge_backend(cfg, logger)
-
-        if backend_type == "waterbridge":
-            if wb_cls:
-                use_waterbridge = True
-                waterbridge_class = wb_cls
-            elif wb_err:
-                 # Explicit failure
-                 warnings_list.append(wb_err)
-                 if logger: logger.error(wb_err)
-                 # Do not backup, abort this bridge
-                 continue
-        
-        # If use_waterbridge is False, we fall through to hbond_analysis fallback logic below (if hbonds is None).
-
-        if use_waterbridge and waterbridge_class:
-            try:
-                wba = _init_water_bridge_analysis(
-                    universe,
-                    sel_a,
-                    sel_b,
-                    cfg,
-                    water_sel,
-                    cls=waterbridge_class
-                )
-                wba_warnings = _run_analysis_with_frames(wba, start=start, stop=stop, step=step)
-                hbonds = _extract_hbond_array(wba)
-                if hbonds.size == 0:
-                    hbonds = None
-                if wba_warnings:
-                    notes.extend(wba_warnings)
-            except Exception as exc:
-                if cfg.backend == "waterbridge":
-                     msg = f"Explicit WaterBridgeAnalysis execution failed for '{cfg.name}': {exc}"
-                     warnings_list.append(msg)
-                     if logger: logger.error(msg)
-                     continue 
-                else: 
-                     # Auto mode fallback
-                     msg = (
-                        f"H-bond water bridge '{cfg.name}' WaterBridgeAnalysis execution failed; "
-                        f"falling back to HydrogenBondAnalysis. ({exc})"
-                     )
-                     warnings_list.append(msg)
-                     if logger:
-                        logger.warning(msg)
-                     hbonds = None
-
-        if hbonds is None:
-            hbonds_a, warn_a = _run_hbond_contacts(
-                universe,
-                sel_a,
-                water_sel,
-                cfg,
-                start,
-                stop,
-                step,
-            )
-            hbonds_b, warn_b = _run_hbond_contacts(
-                universe,
-                sel_b,
-                water_sel,
-                cfg,
-                start,
-                stop,
-                step,
-            )
-            notes.extend(warn_a)
-            notes.extend(warn_b)
-            water_resindices = set(
-                int(res.resindex)
-                for res in universe.select_atoms(water_sel).residues
-            )
-            sets_a = _hbonds_to_water_sets(hbonds_a, universe, water_resindices, frame_index_map)
-            sets_b = _hbonds_to_water_sets(hbonds_b, universe, water_resindices, frame_index_map)
-        else:
-            water_resindices = set(
-                int(res.resindex)
-                for res in universe.select_atoms(water_sel).residues
-            )
-            sets_a = _hbonds_to_water_sets(hbonds, universe, water_resindices, frame_index_map)
-            sets_b = sets_a
-
-        no_hbonds, other_notes = _split_hbond_warnings(notes)
-        if no_hbonds:
-            note_msg = (
-                f"H-bond water bridge '{cfg.name}': no hydrogen bonds matched the criteria "
-                f"(angle {cfg.angle} deg, distance {cfg.distance}A)."
-            )
-            warnings_list.append(note_msg)
-            if logger:
-                logger.info(note_msg)
-            other_notes.append("No hydrogen bonds found for selected criteria.")
-        notes = other_notes
-
-        bridge_sets = []
-        for idx in range(len(frame_times)):
-            set_a = sets_a.get(idx, set())
-            set_b = sets_b.get(idx, set())
-            bridge_sets.append(set_a & set_b)
-
-        acc = StatsAccumulator(
-            solvent_records=solvent.record_by_resindex,
-            gap_tolerance=options.gap_tolerance,
-            frame_stride=options.stride,
-            store_ids=options.store_ids,
-            store_frame_table=store_frame_table,
-        )
-        for idx, bridge_set in enumerate(bridge_sets):
-            frame_label = frame_indices[idx] if idx < len(frame_indices) else idx
-            time_val = float(frame_times[idx]) if idx < len(frame_times) else float(idx)
-            acc.update(idx, time_val, bridge_set, frame_label=frame_label)
-        stats = acc.finalize()
-        stats["summary"]["analysis_method"] = "HBA fallback" if hbonds is None else "WaterBridgeAnalysis"
-        if notes:
-            stats["summary"]["notes"] = notes
-
-        edge_list = _bridge_edge_list(
-            cfg.selection_a,
-            cfg.selection_b,
-            bridge_sets,
-            solvent,
-        )
-
-        results[cfg.name] = BridgeResult(
-            name=cfg.name,
-            per_frame=stats["per_frame"],
-            per_solvent=stats["per_solvent"],
-            bridge_type="hbond",
-            summary=stats["summary"],
-            residence_cont=stats["residence_cont"],
-            residence_inter=stats["residence_inter"],
-            edge_list=edge_list,
-        )
-        if logger:
-            logger.info(
-                "H-bond water bridge %s: %d frames", cfg.name, len(stats["per_frame"])
-            )
-    return results, warnings_list
-
-
-def _init_water_bridge_analysis(
-    universe: mda.Universe,
-    selection_a: str,
-    selection_b: str,
-    cfg: HbondWaterBridgeConfig,
-    water_selection: str,
-    cls: Any = None,
-):
-    if cls is None:
-        # Fallback if not injected (though should be now) - attempt correct path if possible
-        try:
-             from MDAnalysis.analysis.hydrogenbonds import WaterBridgeAnalysis
-             cls = WaterBridgeAnalysis
-        except ImportError:
-             # Legacy path just in case, or fail
-             from MDAnalysis.analysis import waterbridge
-             cls = waterbridge.WaterBridgeAnalysis
-
-    init_params = inspect.signature(cls.__init__).parameters
-    init_params = inspect.signature(cls.__init__).parameters
-    kwargs: Dict[str, object] = {}
-    if "selection1" in init_params:
-        kwargs["selection1"] = selection_a
-        kwargs["selection2"] = selection_b
-    elif "between" in init_params:
-        kwargs["between"] = (selection_a, selection_b)
-    elif "selection" in init_params:
-        kwargs["selection"] = selection_a
-        if "selection2" in init_params:
-            kwargs["selection2"] = selection_b
-    for key in ("water_selection", "water_sel"):
-        if key in init_params:
-            kwargs[key] = water_selection
-            break
-    if "distance" in init_params:
-        kwargs["distance"] = cfg.distance
-    elif "d_a_cutoff" in init_params:
-        kwargs["d_a_cutoff"] = cfg.distance
-    if "angle" in init_params:
-        kwargs["angle"] = cfg.angle
-    elif "d_h_a_angle" in init_params:
-        kwargs["d_h_a_angle"] = cfg.angle
-    if "update_selections" in init_params:
-        kwargs["update_selections"] = cfg.update_selections
-    elif "update_selection" in init_params:
-        kwargs["update_selection"] = cfg.update_selections
-
-    for key, value in [
-        ("donors_sel", cfg.donors_selection),
-        ("donors_selection", cfg.donors_selection),
-        ("hydrogens_sel", cfg.hydrogens_selection),
-        ("hydrogens_selection", cfg.hydrogens_selection),
-        ("acceptors_sel", cfg.acceptors_selection),
-        ("acceptors_selection", cfg.acceptors_selection),
-    ]:
-        if value and key in init_params:
-            kwargs[key] = value
-
-    kwargs = _filter_kwargs(cls.__init__, kwargs)
-    return cls(universe, **kwargs)
-
 
 def _is_static_selection(selection: str) -> bool:
     """Check if a selection is likely static (not distance/geometric)."""
@@ -2020,7 +1476,9 @@ def _run_hbond_contacts(
 
         except Exception as exc:
              # Fallback to serial on error
-             print(f"Parallel hbond failed: {exc}")
+             logging.getLogger("sozlab").warning(
+                 "Parallel hbond contact analysis failed, falling back to serial: %s", exc
+             )
              use_parallel = False
 
     try:
@@ -2200,31 +1658,6 @@ def _run_hbond_hydration(
     return results, warnings_list
 
 
-def _bridge_edge_list(
-    selection_a: str,
-    selection_b: str,
-    bridge_sets: List[set[int]],
-    solvent: SolventUniverse,
-) -> pd.DataFrame:
-    counts: Dict[tuple[str, str], int] = {}
-    for frame_set in bridge_sets:
-        for resindex in frame_set:
-            record = solvent.record_by_resindex.get(resindex)
-            if record is None:
-                continue
-            node = record.stable_id
-            counts[(selection_a, node)] = counts.get((selection_a, node), 0) + 1
-            counts[(selection_b, node)] = counts.get((selection_b, node), 0) + 1
-    rows = [
-        {"source": src, "target": tgt, "frames_present": count}
-        for (src, tgt), count in counts.items()
-    ]
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df.sort_values(by=["frames_present", "source"], ascending=False, inplace=True)
-    return df
-
-
 def _clone_universe(universe: mda.Universe) -> mda.Universe:
     try:
         if hasattr(universe, "copy"):
@@ -2274,17 +1707,20 @@ def _run_density_maps(
         policy = getattr(cfg, "conditioning_policy", "strict")
         is_safe = True
         warnings_list = []
-        
-        # Check alignment
-        if not cfg.align and policy != "unsafe":
-            msg = f"Density map '{cfg.name}' requested without alignment. " \
-                  "This is scientfically unsafe for solvent density."
+
+        # Hydration densities are only interpretable in a common solute frame; rigid-body
+        # drift smears hotspots unless frames are superposed first (MDAnalysis AlignTraj;
+        # Cavalli et al., BMC Genomics 2017).
+        msg = density_conditioning_issue(cfg)
+        if msg is not None:
             if policy == "strict":
-                if logger: logger.error(msg)
-                continue # Skip this map
+                if logger:
+                    logger.error(msg)
+                continue  # Defensive backstop: engine.run() should fail this in preflight.
             else:
                 warnings_list.append(msg)
-                if logger: logger.warning(msg)
+                if logger:
+                    logger.warning(msg)
                 is_safe = False
 
         # TODO: Check PBC correction if metadata available (hard to do generically on Universe without extra info)
@@ -2377,7 +1813,7 @@ def _run_density_maps(
                     if "mass" in str(e).lower() or "selection" in str(e).lower():
                         msg = f"Mass-weighted alignment failed ({e}); falling back to geometric alignment."
                         warnings_list.append(msg)
-                        if logger: logger.warning(f"Density map {cfg.name}: {msg}")
+                        if logger: logger.warning("Density map %s: %s", cfg.name, msg)
                         # [Fix] MDAnalysis enforces mass checks even with weights=None in some versions.
                         # We explicitly sync masses to bypass this check.
                         try:
@@ -2403,7 +1839,7 @@ def _run_density_maps(
                 if align_warn:
                      formatted = f"Align warning: {align_warn[0]}"
                      warnings_list.append(formatted)
-                     if logger: logger.info(f"Density map {cfg.name}: {formatted}")
+                     if logger: logger.info("Density map %s: %s", cfg.name, formatted)
 
             density_kwargs = {
                 "delta": cfg.grid_spacing,

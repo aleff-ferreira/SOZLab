@@ -89,18 +89,6 @@
     "write_parquet": false,
     "report_format": "md"
   },
-  "distance_bridges": [
-    {
-      "name": "bridge_A_B",
-      "selection_a": "selection_a",
-      "selection_b": "selection_b",
-      "cutoff_a": 3.5,
-      "cutoff_b": 4.0,
-      "unit": "A",
-      "atom_mode": "probe"
-    }
-  ],
-  "hbond_water_bridges": [],
   "distance_solvent_contacts": [
     {
       "name": "distance_contact_shell_only",
