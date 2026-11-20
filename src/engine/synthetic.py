@@ -422,3 +422,62 @@ def make_straddling_water_system(
         "box": float(box),
     }
     return SyntheticSystem(u, positions.astype(np.float32), box_v, times, truth)
+
+
+def make_demo_system(n_waters: int = 900, n_frames: int = 200, box: float = 30.0, dt: float = 0.5, seed: int = 7,
+                     n_solute_atoms: int = 14, diffusion: float = 0.25, well_depth: float = 1.3) -> SyntheticSystem:
+    """A small *synthetic* hydrated solute for demonstrations and GUI tests (NOT a molecular dynamics simulation).
+
+    Waters (rigid TIP3P geometry, random orientation) perform overdamped Langevin dynamics (diffusion ``diffusion``
+    A^2/ps) around a rigid cluster of ``n_solute_atoms`` atoms: a soft repulsive core (sigma 2.3 A) plus a Gaussian
+    attractive well at 3.0 A per solute atom, so a hydration shell with a density peak near 3 A forms and exchanges.
+    There is no water-water interaction. Everything is seeded and reproducible.
+    """
+    rng = np.random.default_rng(seed)
+    box_v = np.full(3, float(box))
+    center = box_v / 2.0
+    # compact random solute cluster, minimum atom spacing 1.5 A
+    atoms = []
+    while len(atoms) < n_solute_atoms:
+        cand = rng.normal(scale=2.0, size=3)
+        if np.linalg.norm(cand) < 4.2 and all(np.linalg.norm(cand - a) > 1.5 for a in atoms):
+            atoms.append(cand)
+    solute_local = np.array(atoms)
+    solute_local -= solute_local.mean(axis=0)
+    solute = solute_local + center
+    sigma, well_r, well_w = 2.3, 3.0, 0.45
+    kT_force = diffusion  # D/kT with U in kT units -> drift = D * (-grad U)
+    sub = max(1, int(round(dt / 0.02)))
+    dts = dt / sub
+    noise = np.sqrt(2.0 * diffusion * dts)
+
+    def force(pos: np.ndarray) -> np.ndarray:
+        d = pos[:, None, :] - solute[None, :, :]
+        d -= np.round(d / box_v) * box_v
+        r = np.linalg.norm(d, axis=2) + 1e-9
+        rep = 24.0 * sigma**6 / r**7  # -d/dr of 4 (sigma/r)^6
+        wellf = -well_depth * np.exp(-(((r - well_r) / well_w) ** 2)) * (2.0 * (r - well_r) / well_w**2)  # F_r = -dU/dr, U = -e exp(-x^2)
+        mag = np.where(r < 8.0, rep + wellf, 0.0)  # force along +r (away from the solute atom)
+        return np.sum((mag / r)[:, :, None] * d, axis=1)
+
+    pos = rng.uniform(0, 1, size=(n_waters, 3)) * box_v
+    for _ in range(50):  # remove initial overlaps
+        d = pos[:, None, :] - solute[None, :, :]
+        d -= np.round(d / box_v) * box_v
+        bad = np.linalg.norm(d, axis=2).min(axis=1) < 2.4
+        if not bad.any():
+            break
+        pos[bad] = rng.uniform(0, 1, size=(int(bad.sum()), 3)) * box_v
+    oxy = np.empty((n_frames, n_waters, 3))
+    for t in range(n_frames):
+        oxy[t] = pos
+        for _ in range(sub):
+            pos = pos + kT_force * force(pos) * dts + rng.normal(scale=noise, size=pos.shape)
+            pos = pos % box_v
+    waters = waters_from_oxygens(oxy, rng)
+    positions = np.concatenate([np.tile(solute, (n_frames, 1, 1)), waters.reshape(n_frames, n_waters * 3, 3)], axis=1)
+    positions = _wrap(positions, box_v)
+    times = np.arange(n_frames, dtype=np.float64) * dt
+    u = _build_universe(n_solute_atoms, n_waters, 3, positions, box_v, times)
+    truth = {"synthetic": True, "n_waters": n_waters, "box": float(box), "shell_radius": well_r, "diffusion": diffusion}
+    return SyntheticSystem(u, positions.astype(np.float32), box_v, times, truth)
