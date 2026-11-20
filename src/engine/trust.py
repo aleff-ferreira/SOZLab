@@ -88,6 +88,11 @@ def build_trust(soz_results: Dict[str, object], density_results: Dict[str, objec
                     f"The entry rate changes by {100 * ch:+.0f}% with {row['stride_multiplier']}x coarser sampling "
                     "(boundary re-crossings between frames are missed). Compare entry rates only at the same stride.")
                 break
+        ex = s.get("tau_extrapolation") or {}
+        if ex.get("valid"):
+            add("info", "residence.dt0_estimate", scope,
+                f"Experimental continuous-time residence estimate (sqrt(dt) extrapolation): {ex['tau_dt0']:.3g} ps. "
+                f"{ex['caveat']}.")
         ch_n = [row.get("mean_n_solvent_rel_change") for row in (res.stride_sensitivity or [])[1:]]
         if any(_fin(c) and abs(c) > 0.10 for c in ch_n):
             add("caution", "occupancy.stride_sensitive", scope,

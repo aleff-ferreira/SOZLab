@@ -219,32 +219,89 @@ def make_scripted_system(
     return SyntheticSystem(u, positions.astype(np.float32), box_v, times, truth)
 
 
+#: Vertices of a regular tetrahedron (unit circumradius): a rigid, non-planar, non-collinear solute.
+TETRAHEDRON = np.array([[1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]], dtype=np.float64) / np.sqrt(3.0)
+
+
+def solute_template(n_atoms: int, radius: float = 1.5) -> np.ndarray:
+    """Rigid solute geometry around the origin: one atom, or the first ``n_atoms`` (<=4) tetrahedron vertices."""
+    if n_atoms == 1:
+        return np.zeros((1, 3))
+    if n_atoms > 4:
+        raise ValueError("solute_template supports up to 4 atoms")
+    return TETRAHEDRON[:n_atoms] * radius
+
+
 def make_ideal_gas_system(
     n_waters: int = 800,
     n_frames: int = 400,
     box: float = 30.0,
     seed: int = 0,
     dt: float = 1.0,
+    n_solute_atoms: int = 1,
+    solute_position: Optional[Tuple[float, float, float]] = None,
 ) -> SyntheticSystem:
-    """Independent uniform waters each frame; solute atom at box centre.
+    """Independent uniform waters each frame around a fixed rigid solute (default: one atom at the box centre).
 
-    Truth for a spherical zone of radius ``r`` around the solute atom:
+    Truth for a spherical zone of radius ``r`` around a single solute atom:
     ``n_solvent ~ Binomial(N, p)`` with ``p = (4/3)*pi*r^3 / L^3`` (valid while
     ``r < L/2``), hence ``mean = N p``, ``var = N p (1-p)`` and
     ``P(n>=1) = 1 - (1-p)^N``. The time-averaged oxygen number density is
-    uniform and equal to ``N / L^3``.
+    uniform and equal to ``N / L^3`` at every point of the periodic box - also next to
+    the box faces when ``solute_position`` puts the solute there.
     """
     rng = np.random.default_rng(seed)
     box_v = np.full(3, float(box))
-    center = box_v / 2.0
+    center = box_v / 2.0 if solute_position is None else np.asarray(solute_position, dtype=np.float64)
     oxy = rng.uniform(0.0, 1.0, size=(n_frames, n_waters, 3)) * box_v
     atoms = waters_from_oxygens(oxy, rng)
-    solute = np.tile(center, (n_frames, 1, 1))
+    solute = np.tile(center + solute_template(n_solute_atoms), (n_frames, 1, 1))
     positions = np.concatenate([solute, atoms.reshape(n_frames, n_waters * 3, 3)], axis=1)
     positions = _wrap(positions, box_v)
     times = np.arange(n_frames, dtype=np.float64) * dt
-    u = _build_universe(1, n_waters, 3, positions, box_v, times)
-    truth = {"n_waters": n_waters, "box": float(box), "number_density": n_waters / float(box) ** 3}
+    u = _build_universe(n_solute_atoms, n_waters, 3, positions, box_v, times)
+    truth = {"n_waters": n_waters, "box": float(box), "number_density": n_waters / float(box) ** 3,
+             "solute_center": center.tolist()}
+    return SyntheticSystem(u, positions.astype(np.float32), box_v, times, truth)
+
+
+def make_rotating_solute_system(
+    n_frames: int = 120,
+    n_waters: int = 300,
+    box: float = 40.0,
+    bound_distance: float = 3.0,
+    seed: int = 0,
+    drift: float = 0.0,
+) -> SyntheticSystem:
+    """A tetrahedral solute that tumbles randomly (and optionally drifts) with ONE water bound to it.
+
+    In the solute frame of the first frame the bound water's oxygen sits at
+    ``centre + bound_distance * x_hat`` on every frame, so a correctly superposed density map has a
+    delta-like peak of ``n_frames`` counts at that point; without superposition it smears over a
+    sphere of radius ``bound_distance``. Other waters are uniform and independent.
+    """
+    rng = np.random.default_rng(seed)
+    box_v = np.full(3, float(box))
+    center0 = box_v / 2.0
+    rots = random_rotations(rng, n_frames)
+    rots[0] = np.eye(3)
+    tmpl = solute_template(4)
+    centers = center0 + np.cumsum(rng.normal(scale=drift, size=(n_frames, 3)), axis=0) if drift else np.tile(center0, (n_frames, 1))
+    solute = np.einsum("tij,aj->tai", rots, tmpl) + centers[:, None, :]
+    bound_o = centers + np.einsum("tij,j->ti", rots, np.array([bound_distance, 0.0, 0.0]))
+    others = rng.uniform(0.0, 1.0, size=(n_frames, n_waters, 3)) * box_v
+    for t in range(n_frames):  # keep the uniform waters out of the bound site so the peak is unambiguous
+        d = others[t] - bound_o[t]
+        d -= np.round(d / box_v) * box_v
+        close = np.linalg.norm(d, axis=1) < 2.0
+        others[t, close] += np.array([0.0, 0.0, 6.0])
+    oxy = np.concatenate([bound_o[:, None, :], others], axis=1)
+    atoms = waters_from_oxygens(oxy, rng)
+    positions = np.concatenate([solute, atoms.reshape(n_frames, (n_waters + 1) * 3, 3)], axis=1)
+    positions = _wrap(positions, box_v)
+    times = np.arange(n_frames, dtype=np.float64)
+    u = _build_universe(4, n_waters + 1, 3, positions, box_v, times)
+    truth = {"bound_site_in_first_frame": (center0 + np.array([bound_distance, 0, 0])).tolist(), "n_frames": n_frames}
     return SyntheticSystem(u, positions.astype(np.float32), box_v, times, truth)
 
 
@@ -264,6 +321,29 @@ def sphere_survival(t: np.ndarray, radius: float, diffusion: float, n_terms: int
     return (6.0 / np.pi**2) * np.sum(
         np.exp(-(n**2) * np.pi**2 * diffusion * t[None, :] / radius**2) / n**2, axis=0
     )
+
+
+def sphere_survival_discrete(t: np.ndarray, radius: float, diffusion: float, dt: float, n_terms: int = 600) -> np.ndarray:
+    """Survival of a Brownian particle that starts uniformly inside ``radius`` and is *observed every* ``dt``.
+
+    Discrete observation is, to leading order, equivalent to continuous monitoring with the absorbing wall moved
+    outward to ``R_abs = R + BGK_BETA * sqrt(2 D dt)``, while the start remains uniform in the original sphere ``R``
+    (the Impey estimator conditions on being inside ``R`` at the origin sample)::
+
+        S(t) = (3/R^3) sum_n b_n (-1)^(n+1) R_abs^2/(n pi) exp(-D (n pi / R_abs)^2 t),
+        b_n  = (2/R_abs) int_0^R r sin(n pi r / R_abs) dr
+
+    It reduces to :func:`sphere_survival` for ``dt -> 0``. Against a fine-step brute-force simulation the leading-order
+    correction is accurate to ~0.02 in S for ``sqrt(2 D dt) / R ~ 0.12``.
+    """
+    t = np.asarray(t, dtype=np.float64)
+    r_abs = radius + BGK_BETA * np.sqrt(2.0 * diffusion * dt)
+    n = np.arange(1, n_terms + 1)[:, None]
+    k = n * np.pi / r_abs
+    int_r_sin = (np.sin(k * radius) - k * radius * np.cos(k * radius)) / k**2
+    b = (2.0 / r_abs) * int_r_sin
+    w = b * ((-1.0) ** (n + 1)) * r_abs**2 / (n * np.pi)
+    return (3.0 / radius**3) * np.sum(w * np.exp(-diffusion * k**2 * t[None, :]), axis=0)
 
 
 #: Discrete-monitoring (continuity) correction constant, ``-zeta(1/2)/sqrt(2 pi)``

@@ -68,15 +68,18 @@ DEFINITIONS: Dict[str, Dict[str, str]] = {
         "title": "Intermittent visit",
         "unit": "frames / ps",
         "text": "Visits separated by at most the gap tolerance are merged ('sustained residence', Impey et al. 1983). "
-                "The tolerance may be given in time, which keeps the definition independent of the stride.",
-        "trust": "A tolerance comparable to the sampling interval removes most boundary flicker; large tolerances hide "
-                 "real exchange.",
+                "The tolerance may be given in time, which keeps the definition independent of the stride "
+                "(MDAnalysis' intermittency counts frames).",
+        "trust": "Residence times are very sensitive to the tolerance (Laage & Hynes 2008): a tolerance comparable to the "
+                 "sampling interval removes boundary flicker, but a conventional t* = 2 ps can overestimate residence "
+                 "times for low-barrier exchange. Report the tolerance with the result.",
     },
     "survival": {
         "title": "Survival correlation function S(tau)",
         "unit": "dimensionless",
         "text": "Probability that a molecule inside the zone at a random time origin stays inside, without leaving, "
-                "for the next tau (Impey et al. 1983; Rapaport 1983). Averages over all time origins and molecules.",
+                "for the next tau (the survival probability of MDAnalysis' waterdynamics module, Liu, Harder & Berne "
+                "2004). Averages over all time origins and molecules.",
         "trust": "Needs a window much longer than the decay time; the tail is noisy where few origins remain "
                  "(see origins_* columns).",
     },
@@ -223,11 +226,14 @@ def data_dictionary_markdown(version: str, schema: str) -> str:
     lines += [
         "## References",
         "",
-        "- Impey, Madden, McDonald. J. Phys. Chem. 87, 5071 (1983) - hydration shells, sustained residence.",
-        "- Rapaport. Mol. Phys. 50, 1151 (1983) - continuous-presence correlation functions.",
-        "- Flyvbjerg, Petersen. J. Chem. Phys. 91, 461 (1989); Grossfield et al. LiveCoMS 1, 5067 (2018) - uncertainty.",
-        "- Kaplan, Meier. J. Am. Stat. Assoc. 53, 457 (1958) - censored data.",
-        "- Broadie, Glasserman, Kou. Math. Finance 7, 325 (1997) - discrete-monitoring correction.",
+        "- Impey, Madden, McDonald. J. Phys. Chem. 87, 5071 (1983), doi:10.1021/j150643a008 - hydration shells, tolerance time t*.",
+        "- Laage, Hynes. J. Phys. Chem. B 112, 7697 (2008), doi:10.1021/jp802033r - sensitivity of residence times to t*.",
+        "- Liu, Harder, Berne. J. Phys. Chem. B 108, 6595 (2004), doi:10.1021/jp0375057 - survival probability (cited by MDAnalysis).",
+        "- Flyvbjerg, Petersen. J. Chem. Phys. 91, 461 (1989), doi:10.1063/1.457480 - error estimates for correlated data.",
+        "- Grossfield et al. Living J. Comput. Mol. Sci. 1(1), 5067 (2018), doi:10.33011/livecoms.1.1.5067 - uncertainty best practices.",
+        "- Kaplan, Meier. J. Am. Stat. Assoc. 53, 457 (1958), doi:10.1080/01621459.1958.10501452 - censored data.",
+        "- Broadie, Glasserman, Kou. Math. Finance 7, 325 (1997), doi:10.1111/1467-9965.00035 - discrete-monitoring continuity correction.",
+        "- Kabsch. Acta Cryst. A 32, 922 (1976), doi:10.1107/S0567739476001873 - optimal superposition.",
         "",
     ]
     return "\n".join(lines)

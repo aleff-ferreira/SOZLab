@@ -364,31 +364,64 @@ def suggest_water_resnames(universe: mda.Universe) -> List[str]:
 
 
 # --------------------------------------------------------------------------- integrity
+def _atom_count_outliers(solvent: SolventUniverse, dominance: float = 0.8) -> Dict[str, Dict[str, object]]:
+    """Residues whose atom count differs from the dominant count of residues with the same name.
+
+    File parsers merge consecutive molecules that share residue number and name into one residue,
+    so a ``SOL`` residue with 6 atoms among thousands with 3 is almost certainly two waters.
+    """
+    lay = solvent.layout
+    n_atoms = np.bincount(lay.all_owner, minlength=lay.n_solvent)
+    names = np.asarray([solvent.record_by_resindex[int(r)].resname for r in lay.resindex_by_ord])
+    out: Dict[str, Dict[str, object]] = {}
+    for name in np.unique(names):
+        sel = np.flatnonzero(names == name)
+        vals, cnt = np.unique(n_atoms[sel], return_counts=True)
+        mode = int(vals[np.argmax(cnt)])
+        if cnt.max() / len(sel) < dominance:
+            continue
+        odd = sel[n_atoms[sel] != mode]
+        if len(odd):
+            ex = [f"{solvent.record_by_resindex[int(lay.resindex_by_ord[o])].display_id} ({int(n_atoms[o])} atoms)"
+                  for o in odd[:3]]
+            out[str(name)] = {"expected_atoms": mode, "n_outliers": int(len(odd)), "examples": ex}
+    return out
+
+
 def integrity_report(solvent: SolventUniverse, positions: np.ndarray, box: Optional[Box],
-                     max_extent: float = 4.0, sample: int = 20000) -> Dict[str, object]:
+                     sample: int = 20000) -> Dict[str, object]:
     """Check that each solvent molecule is geometrically intact in one frame.
 
-    The largest minimum-image distance of an atom from its molecule's first atom should be
-    small (< 4 A for water-like molecules). Large values mean the topology and trajectory do
-    not describe the same atoms in the same order (a silent identity error), or the
-    molecule is larger than half the box.
+    The largest minimum-image distance of an atom from its molecule's first atom must not exceed
+    what a chain of ``n`` atoms can span (1.7 A per bond, +1 A tolerance). Larger values mean the
+    topology and trajectory do not describe the same atoms in the same order, that consecutive molecules
+    were merged into one residue by the file parser (identical residue number and name), or that the
+    molecule is larger than half the box. Without a valid box molecules split by wrapping cannot be
+    recognised, so the check is skipped rather than guessed.
     """
     lay = solvent.layout
     idx = lay.all_idx
     owner = lay.all_owner
+    outliers = _atom_count_outliers(solvent)
+    if box is None:
+        return {"n_checked": 0, "n_broken": 0, "max_extent": 0.0, "examples": [], "skipped": "no valid box",
+                "atom_count_outliers": outliers}
     if len(idx) == 0:
-        return {"n_checked": 0, "n_broken": 0, "max_extent": 0.0, "examples": []}
+        return {"n_checked": 0, "n_broken": 0, "max_extent": 0.0, "examples": [], "atom_count_outliers": outliers}
     order, starts, counts = group_layout(owner)
     pos = np.asarray(positions[idx][order], dtype=np.float64)
     ref = np.repeat(pos[starts], counts, axis=0)
     disp = minimum_image(pos - ref, box)
     extent = np.maximum.reduceat(np.linalg.norm(disp, axis=1), starts)
-    bad = np.flatnonzero(extent > max_extent)
-    n_check = len(extent)
+    bound = 1.7 * (counts - 1) + 1.0
+    bad = np.flatnonzero(extent > bound)
     bad_ord = owner[order][starts[bad]]
-    examples = [solvent.record_by_resindex[int(lay.resindex_by_ord[int(o)])].display_id for o in bad_ord[:5]]
-    return {"n_checked": int(n_check), "n_broken": int(len(bad)), "max_extent": float(extent.max()),
-            "examples": examples}
+    examples = []
+    for o, b in zip(bad_ord[:5], bad[:5]):
+        rec = solvent.record_by_resindex[int(lay.resindex_by_ord[int(o)])]
+        examples.append(f"{rec.display_id} ({int(counts[b])} atoms)")
+    return {"n_checked": int(len(extent)), "n_broken": int(len(bad)), "max_extent": float(extent.max()),
+            "examples": examples, "atom_count_outliers": outliers}
 
 
 # --------------------------------------------------------------------------- construction

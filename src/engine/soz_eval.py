@@ -8,8 +8,7 @@ dominated by one neighbour search per leaf.
 Leaf semantics
 --------------
 ``distance``  a solvent molecule is in the zone when its probe lies within ``cutoff`` of
-              *any* atom of the selection (minimum image under periodic boundaries;
-              Lazaridis, J. Phys. Chem. B 102, 3531, 1998 for the zone concept).
+              *any* atom of the selection (minimum image under periodic boundaries).
 ``shell``     ``cutoffs = [r1, r2, ...]``. With ``mode="chained"`` (the v2.0 behaviour, kept
               as the default so existing projects reproduce) shell *k* contains solvent within
               ``r_k`` of the molecules of shell *k-1*, so the zone reaches up to ``sum(r_k)``

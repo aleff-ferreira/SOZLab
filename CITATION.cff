@@ -1,14 +1,23 @@
-title: SOZLab
+cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
-SOZLab a Linux GUI + CLI for solvent occupancy zone analysis
-authors: Aleff Ferreira Francisco
-version: 1.0.0
-date-released: 2025-01-23
-url: https://github.com/aleff-ferreira/SOZLab
+title: "SOZLab: GUI and CLI for solvent occupancy zone analysis of molecular dynamics trajectories"
+type: software
+authors:
+  - family-names: "Ferreira Francisco"
+    given-names: "Aleff"
+version: 2.1.0
+date-released: 2026-11-20
+url: "https://github.com/aleff-ferreira/SOZLab"
+repository-code: "https://github.com/aleff-ferreira/SOZLab"
 license: MIT
+abstract: >-
+  SOZLab analyses the solvent in user-defined zones of molecular dynamics trajectories: occupancy,
+  entries and exits, residence times with uncertainty, and solute-frame density maps, with
+  provenance-verified frame extraction.
 keywords:
   - solvent
   - occupancy
-  - GROMACS
-  - MDAnalysis
+  - residence time
   - molecular dynamics
+  - MDAnalysis
+  - GROMACS

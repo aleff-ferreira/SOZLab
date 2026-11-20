@@ -760,11 +760,19 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
             universe.trajectory[0]
             integ = integrity_report(solvent, universe.trajectory.ts.positions, box0)
             pbc_summary["solvent_integrity"] = integ
+            for rname, info in (integ.get("atom_count_outliers") or {}).items():
+                warnings.append(
+                    f"{info['n_outliers']} '{rname}' residue(s) have a different number of atoms than the usual "
+                    f"{info['expected_atoms']} (e.g. {', '.join(info['examples'])}): consecutive molecules sharing a "
+                    "residue number and name are merged into one residue by GRO/PDB parsers, which silently "
+                    "corrupts counts and identities. Renumber the solvent residues."
+                )
             if integ["n_checked"] and integ["n_broken"]:
                 frac = integ["n_broken"] / integ["n_checked"]
                 msg = (f"{integ['n_broken']} of {integ['n_checked']} solvent molecules are not geometrically intact in "
                        f"frame 0 (largest intramolecular extent {integ['max_extent']:.1f} A, e.g. {', '.join(integ['examples'][:3])}). "
-                       "The topology and trajectory may not describe the same atoms in the same order.")
+                       "Either the topology and trajectory do not describe the same atoms in the same order, or the file "
+                       "parser merged consecutive molecules that share a residue number and name into one residue.")
                 (errors if frac > 0.05 else warnings).append(msg)
     except Exception as exc:  # never let a QC probe break a run
         logger.debug("solvent integrity check skipped: %s", exc)

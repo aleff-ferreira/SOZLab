@@ -334,7 +334,7 @@ def write_extracted_trajectory(
             {
                 "written_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "format": fmt,
-                "coordinate_precision": "0.001 nm (XTC compression)" if fmt == "xtc" else "float32 (lossless)",
+                "coordinate_precision": "0.001 nm (XTC lossy compression)" if fmt == "xtc" else "float32 (no compression; unit conversion rounds ~2e-6 A)",
                 "n_frames_written": total,
                 "n_atoms": int(universe.atoms.n_atoms),
                 "verification": verification,

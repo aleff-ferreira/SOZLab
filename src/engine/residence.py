@@ -8,15 +8,18 @@ For one solvent molecule let ``h(k) = 1`` when it is inside the zone at sample `
   but biased: visits cut by the window edges are shorter than they really were
   (*censoring*), and the visits you can observe are biased toward short ones when the
   window is short compared with the longest residence.
-* **Survival correlation function** (Impey et al. 1983; Rapaport 1983)::
+* **Survival correlation function** - the probability that a solvent inside the zone at a random
+  time origin has stayed inside, without leaving, for the following ``tau``::
 
       S(tau) = < h(t0) * prod_{t0<=t<=t0+tau} h(t) > / < h(t0) >
 
-  the probability that a solvent inside the zone at a random time origin has stayed
-  inside, without leaving, for the following ``tau``. It uses every time origin, needs no
-  event definition, is the quantity other tools report (MDAnalysis ``SurvivalProbability``,
-  CPPTRAJ lifetime analyses) and can be integrated to a mean residence time
-  ``int S dtau`` or fitted to ``exp(-tau / tau_c)``.
+  It uses every time origin, needs no event definition, and is the survival probability that MDAnalysis
+  provides (``waterdynamics.SurvivalProbability``, which cites Liu, Harder & Berne, J. Phys. Chem. B 108, 6595,
+  2004). It can be integrated to a mean residence time ``int S dtau`` or fitted to ``exp(-tau / tau_c)``. The
+  tolerance-time ("sustained residence") idea for ignoring brief absences is that of Impey, Madden & McDonald,
+  J. Phys. Chem. 87, 5071 (1983); Laage & Hynes, J. Phys. Chem. B 112, 7697 (2008) show such residence times are
+  very sensitive to the tolerance t*. MDAnalysis counts its ``intermittency`` in *frames*; here the tolerance can
+  be given in time so that it does not change with the stride.
 
 ``S`` is computed **exactly and in O(n log n)** from the presence runs rather than from the
 per-frame indicator matrix: a run covering samples ``a..b`` contributes ``L - m`` surviving
