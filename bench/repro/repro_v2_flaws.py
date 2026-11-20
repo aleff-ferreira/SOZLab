@@ -233,7 +233,7 @@ def check_censoring_unflagged(tmp):
     r = SOZAnalysisEngine(make_project(gro, xtc, d / "out")).run()
     ps = r.soz_results["Z"].per_solvent
     cols = list(ps.columns)
-    has_flag = any("censor" in c.lower() for c in cols)
+    has_flag = any(("censor" in c.lower() or "complete" in c.lower()) for c in cols)
     return dict(reproduced=bool(not has_flag),
                 evidence=dict(per_solvent_columns=cols, true_complete_segments=1, window_edge_segments=2),
                 explanation="segments cut by the window edge are averaged with complete ones and not identified")
@@ -273,8 +273,14 @@ def check_broken_molecule_probe(tmp):
                 explanation="COG/COM probes of a molecule split across the periodic boundary fail (crash or wrong zone membership) when the topology has no bonds")
 
 
+def _opts(**kw):
+    """AnalysisOptions with only the fields this version knows (the same script runs on v2.0 and v2.1)."""
+    fields = AnalysisOptions.__dataclass_fields__
+    return AnalysisOptions(**{k: v for k, v in kw.items() if k in fields})
+
+
 def check_workers_is_noop(tmp):
-    s = syn.make_ideal_gas_system(n_waters=900, n_frames=60, box=32.0, seed=9)
+    s = syn.make_ideal_gas_system(n_waters=900, n_frames=240, box=32.0, seed=9)
     d = Path(tmp) / "r8"; gro, xtc = s.write(d, "traj")
     import concurrent.futures as cf
     calls = {"n": 0}
@@ -287,17 +293,20 @@ def check_workers_is_noop(tmp):
     cf.ProcessPoolExecutor.__init__ = counting
     try:
         t0 = time.time()
-        SOZAnalysisEngine(make_project(gro, xtc, d / "o1", analysis=AnalysisOptions(store_min_distances=False, workers=1))).run()
+        r1 = SOZAnalysisEngine(make_project(gro, xtc, d / "o1", analysis=_opts(store_min_distances=True, workers=1))).run()
         t1 = time.time() - t0
         calls["n"] = 0
         t0 = time.time()
-        SOZAnalysisEngine(make_project(gro, xtc, d / "o8", analysis=AnalysisOptions(store_min_distances=False, workers=8))).run()
+        r8 = SOZAnalysisEngine(make_project(gro, xtc, d / "o8", analysis=_opts(
+            store_min_distances=True, workers=4, parallel_min_seconds=0.0))).run()
         t8 = time.time() - t0
     finally:
         cf.ProcessPoolExecutor.__init__ = orig
+    same = bool((r1.soz_results["Z"].per_frame["n_solvent"].to_numpy() == r8.soz_results["Z"].per_frame["n_solvent"].to_numpy()).all())
     return dict(reproduced=bool(calls["n"] == 0),
-                evidence=dict(process_pools_created_with_workers_8=calls["n"], wall_s_workers1=round(t1, 2), wall_s_workers8=round(t8, 2)),
-                explanation="the per-frame SOZ loop is serial; 'workers' only affects the (stripped) H-bond path")
+                evidence=dict(process_pools_created_with_workers_4=calls["n"], wall_s_workers1=round(t1, 2),
+                              wall_s_workers4=round(t8, 2), n_solvent_identical_serial_vs_workers=same),
+                explanation="the per-frame SOZ loop is serial; 'workers' only affected the (stripped) H-bond path")
 
 
 def check_density_ignores_global_window(tmp):

@@ -1,7 +1,7 @@
 """Selection resolution helpers."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import logging
@@ -19,6 +19,8 @@ class ResolvedSelection:
     label: str
     group: mda.core.groups.AtomGroup
     selection_string: str
+    notes: list = field(default_factory=list)  # silent corrections the resolver applied
+    dynamic: bool = False  # group is an UpdatingAtomGroup, re-evaluated every frame
 
 
 def _build_selection(spec: SelectionSpec) -> str:
@@ -98,6 +100,7 @@ def _looks_one_based(indices, n_atoms: int) -> bool:
 
 def resolve_selection(universe: mda.Universe, spec: SelectionSpec) -> ResolvedSelection:
     n_atoms = len(universe.atoms)
+    notes: list = []
     if spec.selection:
         raw_selection = spec.selection
         selection = sanitize_selection_string(raw_selection)
@@ -115,7 +118,7 @@ def resolve_selection(universe: mda.Universe, spec: SelectionSpec) -> ResolvedSe
         if selection:
             logger.info("Selection %s (raw): %s", spec.label, selection)
         try:
-            group = universe.select_atoms(selection)
+            group = universe.select_atoms(selection, updating=bool(spec.updating))
         except IndexError:
             if _INDEX_PATTERN.search(selection):
                 shifted = _shift_index_selection(selection, -1)
@@ -123,7 +126,11 @@ def resolve_selection(universe: mda.Universe, spec: SelectionSpec) -> ResolvedSe
                     logger.info(
                         "Selection %s shifted for index fix: %s", spec.label, shifted
                     )
-                    group = universe.select_atoms(shifted)
+                    notes.append(
+                        f"Selection '{spec.label}': 'index' values were out of range and were shifted by -1 "
+                        f"(MDAnalysis index is 0-based): {shifted}"
+                    )
+                    group = universe.select_atoms(shifted, updating=bool(spec.updating))
                     selection = shifted
                 else:
                     raise
@@ -135,7 +142,8 @@ def resolve_selection(universe: mda.Universe, spec: SelectionSpec) -> ResolvedSe
                 logger.info(
                     "Selection %s shifted for one-based indices: %s", spec.label, shifted
                 )
-                group = universe.select_atoms(shifted)
+                notes.append(f"Selection '{spec.label}': 'index' values shifted by -1 (looked one-based): {shifted}")
+                group = universe.select_atoms(shifted, updating=bool(spec.updating))
                 selection = shifted
     elif spec.atom_indices:
         raw_indices = [int(idx) for idx in spec.atom_indices]
@@ -165,7 +173,11 @@ def resolve_selection(universe: mda.Universe, spec: SelectionSpec) -> ResolvedSe
     if len(group) == 0:
         raise ValueError(f"Selection '{spec.label}' resolved to 0 atoms")
 
-    # Guard against out-of-bounds indices from upstream parsers.
+    # Guard against out-of-bounds indices from upstream parsers (static groups only).
+    if spec.updating and spec.selection:
+        if spec.require_unique and len(group) != 1:
+            raise ValueError(f"Selection '{spec.label}' expected unique atom but resolved {len(group)} atoms")
+        return ResolvedSelection(label=spec.label, group=group, selection_string=selection, notes=notes, dynamic=True)
     indices = group.indices
     if _looks_one_based(indices, n_atoms):
         indices = indices - 1
@@ -195,7 +207,8 @@ def resolve_selection(universe: mda.Universe, spec: SelectionSpec) -> ResolvedSe
             f"Selection '{spec.label}' expected {spec.expect_count} atoms but resolved {len(group)}"
         )
 
-    return ResolvedSelection(label=spec.label, group=group, selection_string=selection)
+    return ResolvedSelection(label=spec.label, group=group, selection_string=selection, notes=notes,
+                             dynamic=bool(spec.updating and spec.selection))
 
 
 def resolve_selection_from_label(
