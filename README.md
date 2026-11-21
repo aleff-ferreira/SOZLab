@@ -64,7 +64,7 @@ sozlab-cli run --project project.json --output results/
 sozlab-cli validate --project project.json
 sozlab-cli extract --from-results results/ --rule "n_solvent>=1" --out frames/
 sozlab-cli verify results/
-sozlab-cli selftest             # known-answer checks on this installation (about a minute)
+sozlab-cli selftest             # known-answer checks on this installation (about 10 seconds)
 ```
 
 Projects written by v2.0 still open (folder menu → *Open a project file…* in the Workbench, `--project` in the CLI); a project saved

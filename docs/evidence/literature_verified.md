@@ -251,3 +251,13 @@ Per-tool evidence URLs:
 | VMD `pbwithin` in the User's Guide; VMD periodic or triclinic behaviour of `within` | UG pages node89 to node97 and node156 read; keyword not found there | developer reply on VMD-L only |
 | Newer MDTraj docs than 1.9.4 | `mdtraj.org/latest` and 1.9.9 paths returned AccessDenied | version 1.9.4 only |
 | Publisher landing pages (ACS, AIP, Wiley, T&F, IEEE, ACM, Elsevier) | scripted access blocked or paywalled; Crossref and PubMed used instead | registry-level verification only |
+
+
+---
+
+## 6. Added during the SOZLab 2.1 audit (maintainer session, verified against Crossref on 2026-11-21)
+
+| Reference | DOI | Verification | Use in SOZLab |
+|---|---|---|---|
+| Broadie M, Glasserman P, Kou S. *A continuity correction for discrete barrier options*. Mathematical Finance 1997;7(4):325-349 | [10.1111/1467-9965.00035](https://doi.org/10.1111/1467-9965.00035) | Crossref VERIFIED (3 authors, vol 7, issue 4, pp 325-349, 1997). The constant 0.5826 is quoted from the paper's result, not read from the registry; SOZLab's use of it is tested in `tests/test_brownian_validation.py` (engine output against the discrete-monitoring theory on simulated Brownian dynamics); the closed form was also checked once against a 200 000-particle fine-step simulation during development (not kept as a test) | Discrete monitoring moves a barrier outward by about 0.5826 sigma sqrt(dt): the reason a continuous residence time grows with the sampling interval, and the basis of the experimental extrapolation in sqrt(dt) |
+| Sokal AD. *Monte Carlo methods in statistical mechanics: foundations and new algorithms*. In: Functional Integration (NATO ASI Series B, vol 361), 1997, pp 131-192 | [10.1007/978-1-4899-0319-8_6](https://doi.org/10.1007/978-1-4899-0319-8_6) | Crossref VERIFIED (1 author, pages 131-192, 1997) | Automatic windowing of the autocorrelation function for the standard error of time averages (`engine/uncertainty.py`) |
