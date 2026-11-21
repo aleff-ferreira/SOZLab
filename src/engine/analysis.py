@@ -77,6 +77,10 @@ def analysis_frame_indices(n_frames: int, options: AnalysisOptions) -> range:
 
 
 # ------------------------------------------------------------------------------------ results
+class RunCancelledError(ValueError):
+    """The run was cancelled before any frame was analysed: there is no (partial) result to return."""
+
+
 @dataclass
 class HydrationResult:  # kept for import compatibility; the analysis itself was removed
     name: str
@@ -295,7 +299,7 @@ class SOZAnalysisEngine:
                 n_done, total_frames, run_info.seconds, run_info.reason,
             )
         if n_done == 0:
-            raise ValueError("The run was cancelled before any frame was analysed")
+            raise RunCancelledError("The run was cancelled before any frame was analysed")
         if cancelled:
             warnings.append(
                 f"The run was cancelled after {n_done} of {total_frames} frames; results cover only that window "
@@ -564,8 +568,9 @@ def _extrapolate_tau(rows: List[Dict[str, object]]) -> Dict[str, object]:
     out: Dict[str, object] = {
         "method": "linear fit of tau_survival_integral against sqrt(dt) over the 1x/2x/4x strides, extrapolated to dt = 0",
         "status": "experimental",
-        "caveat": "assumes diffusive zone-boundary crossing on the sampled time scale; verified on a Brownian ground truth "
-                  "(error -2..-4%); not validated for inertial dynamics",
+        "caveat": "assumes diffusive zone-boundary crossing on the sampled time scale. Verified on a Brownian ground truth "
+                  "(error -2..-4%), but on TIP3P Na+ first-shell water measured against 0.02 ps sampling it was within -24..+4% "
+                  "for dt <= 0.32 ps and over-estimated by +28..+64% at dt = 0.64..1.28 ps: indicative only, do not quote it",
         "tau_dt0": float("nan"), "slope_per_sqrt_time": float("nan"), "n_points": len(pts), "valid": False,
     }
     if len(pts) >= 3:

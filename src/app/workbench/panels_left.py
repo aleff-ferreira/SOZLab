@@ -12,7 +12,7 @@ from app.workbench import icons
 from app.workbench.charts import CutoffGuide
 from app.workbench.session import Issue, Session
 from app.workbench.theme import Theme, set_prop
-from app.workbench.widgets import Card, Chip, DropZone, FlowLayout, ParamField, make_label
+from app.workbench.widgets import Card, Chip, DropZone, FlowLayout, ParamField, make_label, dispose
 
 Qt = QtCore.Qt
 
@@ -43,7 +43,7 @@ class IssueList(QtWidgets.QWidget):
         while self._lay.count():
             it = self._lay.takeAt(0)
             if it.widget():
-                it.widget().deleteLater()
+                dispose(it.widget())
         t = _t().t
         for issue in issues:
             fr = QtWidgets.QFrame()
@@ -143,13 +143,13 @@ class ImportCard(Card):
     def _on_error(self, msg: str) -> None:
         self.error_text.setText(msg)
         self.stack.setCurrentIndex(3)
-        self.set_status("could not open", "err")
+        self.set_status("failed", "err")
 
     def _on_summary(self, s: dict) -> None:
         while self.file_rows.count():
             it = self.file_rows.takeAt(0)
             if it.widget():
-                it.widget().deleteLater()
+                dispose(it.widget())
         for label, path in (("Topology", s["topology"]), ("Trajectory", s["trajectory"])):
             if path:
                 row = QtWidgets.QHBoxLayout()
@@ -255,7 +255,7 @@ class ZoneCard(Card):
         self.f_probe_sel = ParamField.text("Probe atom selection", "name O OW OH2", tooltip="The atom used as each solvent molecule's position")
         self.f_ions = ParamField.check("Count ions as solvent", False)
         self.add_advanced([self.f_b, self.f_bcut, self.f_comb, self.f_shells, self.f_dynamic, self.f_probe, self.f_names,
-                           self.f_probe_sel, self.f_ions], "Advanced zone settings")
+                           self.f_probe_sel, self.f_ions], "Advanced settings")
         # wiring
         self._debounce = QtCore.QTimer(self)
         self._debounce.setSingleShot(True)
@@ -281,7 +281,7 @@ class ZoneCard(Card):
         while self.chip_flow.count():
             it = self.chip_flow.takeAt(0)
             if it.widget():
-                it.widget().deleteLater()
+                dispose(it.widget())
         self._chips = []
         for comp in s["components"]:
             b = QtWidgets.QPushButton(f"{comp['label']}")
@@ -321,7 +321,7 @@ class ZoneCard(Card):
             set_prop(b, "checked", "true" if on else "false")
         self.description.setText(("Definition: " + z.describe()) if z.is_defined else "")
         self._building = False
-        self.set_status("defined" if z.is_defined and self.session.selection_ok is not False else "needs a selection",
+        self.set_status("defined" if z.is_defined and self.session.selection_ok is not False else "incomplete",
                         "ok" if z.is_defined and self.session.selection_ok is not False else "warn")
 
     def _on_selection_info(self, info: dict) -> None:
@@ -445,7 +445,7 @@ class RunCard(Card):
         browse.clicked.connect(self._browse_out)
         self.f_outdir.layout().addWidget(browse, 1, 2)
         self.add_advanced([self.f_start, self.f_stop, self.f_gap, self.f_blocks, self.f_sens, self.f_workers, self.f_dt, self.f_density,
-                           self.f_spacing, self.f_padding, self.f_outdir], "Advanced run settings")
+                           self.f_spacing, self.f_padding, self.f_outdir], "Advanced settings")
         self.hint = make_label("", "caption", word_wrap=True)
         self.add(self.hint)
         for f in (self.f_start, self.f_stop, self.f_stride, self.f_gap, self.f_blocks, self.f_sens, self.f_workers, self.f_dt,
@@ -508,7 +508,7 @@ class RunCard(Card):
             self.hint.setText("Fix the red items above to enable Run.")
         elif self.session.summary is not None:
             self.hint.setText("Ready. Results appear on the right; nothing is written until you export.")
-        self.set_status("needs attention" if errs else "ready", "err" if errs else "ok")
+        self.set_status("blocked" if errs else "ready", "err" if errs else "ok")
 
     def _set_running(self, running: bool) -> None:
         for f in (self.f_start, self.f_stop, self.f_stride, self.f_gap, self.f_blocks, self.f_sens, self.f_workers, self.f_dt,

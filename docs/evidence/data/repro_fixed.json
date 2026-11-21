@@ -1,0 +1,332 @@
+{
+  "label": "fixed",
+  "engine": "D:\\sozlab\\src\\engine",
+  "mdanalysis": "2.9.0",
+  "python": "3.12.10",
+  "platform": "win32",
+  "results": [
+    {
+      "reproduced": false,
+      "evidence": {
+        "max_abs_diff_run2_vs_run1": 0.14814814814814814,
+        "max_abs_diff_run2_vs_fresh_recompute": 0.0,
+        "cache_metadata_keys": [
+          "algorithm_version",
+          "align",
+          "align_reference",
+          "align_reference_path",
+          "align_selection",
+          "align_weighting",
+          "analysis_warnings",
+          "arrays_sha256",
+          "bulk",
+          "cache",
+          "center",
+          "density_unit",
+          "edge_lengths",
+          "engine",
+          "fraction_of_species_inside_grid",
+          "frame_start",
+          "frame_stop",
+          "fully_covered_radius",
+          "grid_path",
+          "grid_spacing",
+          "is_scientifically_safe",
+          "mode",
+          "n_blocks",
+          "n_frames",
+          "name",
+          "notes",
+          "origin",
+          "origin_convention",
+          "output_format",
+          "region_padding",
+          "region_selection",
+          "reliable_fraction",
+          "rho_bulk",
+          "rho_bulk_approx",
+          "seconds",
+          "selection",
+          "selection_is_dynamic",
+          "shape",
+          "solute_com_drift_max",
+          "solute_rotation_max_deg"
+        ]
+      },
+      "explanation": "cache invalidated",
+      "id": "R01",
+      "severity": "critical",
+      "title": "Stale density cache (path-only key)",
+      "seconds": 1.82
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "selected_frames": [
+          10,
+          11,
+          12,
+          13,
+          14
+        ],
+        "refused_with": "ExtractionMismatchError: The trajectory does not contain the frames that were analysed; nothing was written. frame 10: coordinates differ from the analysed frame (fingerprint 0f0a6ec201",
+        "oracle_n_solvent_in_extracted_frames": null
+      },
+      "explanation": "extraction refused or content consistent",
+      "id": "R02",
+      "severity": "critical",
+      "title": "Extraction against mutated inputs",
+      "seconds": 0.12
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "irregular_sampling": {
+          "reported_ps": 350.5,
+          "true_duration_ps": 350.5,
+          "rel_error": 0.0,
+          "summary_dt": 1.0
+        },
+        "single_frame": {
+          "summary_dt": NaN,
+          "reported_res_time": NaN,
+          "timing_flagged": true
+        },
+        "no_timestamps_format": {
+          "time_unit_reported": "ps",
+          "mentions_assumed_timing": true,
+          "qc_timing_block": {
+            "source": "assumed",
+            "time_unit": "ps",
+            "n_samples": 12,
+            "dt_median": 1.0,
+            "dt_min": 1.0,
+            "dt_max": 1.0,
+            "uniform": true,
+            "monotonic": true,
+            "n_duplicate_times": 0,
+            "trusted": false,
+            "first_time": 0.0,
+            "last_time": 11.0,
+            "notes": [
+              "The trajectory format stores no time stamps; times are frame index x 1 ps assumed by MDAnalysis. Set analysis.dt_override (ps per trajectory frame) to give physical durations."
+            ]
+          }
+        }
+      },
+      "explanation": "duration = n_frames x median(dt); fabricated dt=1.0 for 1 frame; time-less formats reported as ps",
+      "id": "R03",
+      "severity": "critical",
+      "title": "Assumed single-frame / uniform timing",
+      "seconds": 0.28
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "entries_frame0": 0,
+        "total_entries": 0,
+        "entry_rate_per_frame": 0.0,
+        "true_entry_events_in_window": 0
+      },
+      "explanation": "a solvent already inside at frame 0 is counted as an entry event (no entry was observed)",
+      "id": "R04",
+      "severity": "major",
+      "title": "Initial population counted as entries",
+      "seconds": 0.1
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "per_solvent_columns": [
+          "solvent_id",
+          "resindex",
+          "resname",
+          "resid",
+          "segid",
+          "frames_present",
+          "occupancy_pct",
+          "first_seen_frame",
+          "last_seen_frame",
+          "entries",
+          "mean_res_time_cont",
+          "median_res_time_cont",
+          "mean_res_time_inter",
+          "median_res_time_inter",
+          "present_at_start",
+          "present_at_end",
+          "n_visits",
+          "n_visits_complete",
+          "n_visits_censored",
+          "mean_res_time_cont_complete",
+          "max_res_time_cont",
+          "time_in_zone"
+        ],
+        "true_complete_segments": 1,
+        "window_edge_segments": 2
+      },
+      "explanation": "segments cut by the window edge are averaged with complete ones and not identified",
+      "id": "R05",
+      "severity": "major",
+      "title": "Window-edge (censored) residence segments unflagged",
+      "seconds": 0.1
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "n_rows": 4,
+        "n_unique_ids": 4,
+        "duplicated": []
+      },
+      "explanation": "two different molecules share one solvent_id",
+      "id": "R06",
+      "severity": "major",
+      "title": "Non-unique solvent identifiers",
+      "seconds": 0.1
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "n_solvent_by_probe_mode": {
+          "atom": [
+            1,
+            1,
+            1
+          ],
+          "cog": [
+            1,
+            1,
+            1
+          ],
+          "com": [
+            1,
+            1,
+            1
+          ]
+        },
+        "truth": [
+          1,
+          1,
+          1
+        ],
+        "wrong_or_failing_modes": []
+      },
+      "explanation": "COG/COM probes of a molecule split across the periodic boundary fail (crash or wrong zone membership) when the topology has no bonds",
+      "id": "R07",
+      "severity": "critical",
+      "title": "COM/COG probe of PBC-split molecule",
+      "seconds": 0.25
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "process_pools_created_with_workers_4": 1,
+        "wall_s_workers1": 0.31,
+        "wall_s_workers4": 2.65,
+        "n_solvent_identical_serial_vs_workers": true
+      },
+      "explanation": "the per-frame SOZ loop is serial; 'workers' only affected the (stripped) H-bond path",
+      "id": "R08",
+      "severity": "major",
+      "title": "'workers' has no effect on the SOZ loop",
+      "seconds": 3.17
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "soz_frames": 8,
+        "density_stride_used": 5,
+        "analysis_stride": 5,
+        "grid_origin_with_soz_stop_10": [
+          -11.648,
+          -11.699,
+          -12.253
+        ],
+        "grid_origin_with_soz_stop_11": [
+          -11.648,
+          -11.699,
+          -12.253
+        ]
+      },
+      "explanation": "density ignores the global stride and its grid extent depends on the last SOZ frame visited",
+      "id": "R09",
+      "severity": "major",
+      "title": "Density ignores global window; grid extent depends on hidden state",
+      "seconds": 0.51
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "frames_returned": 7,
+        "frames_expected": 20,
+        "result_marked_partial": true
+      },
+      "explanation": "cancelled run returns normal-looking results; the GUI auto-exports them over earlier outputs",
+      "id": "R10",
+      "severity": "major",
+      "title": "Cancelled run returns unmarked partial results",
+      "seconds": 0.09
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "n_solvent": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "intended_shell_radius_A": 5.0,
+        "solvent_at_A": 4.5,
+        "warned": true,
+        "warning_messages": [
+          "Z (shell): parameter(s) distance are ignored (a shell node takes 'cutoffs': [r1, r2, ...]; the 3.5 A default is being used)",
+          "Z (shell): no 'cutoffs' given; default [3.5] A is used",
+          "SOZs with zero occupancy: Z",
+          "SOZ 'Z' has zero occupancy; leaf nodes are empty in sampled frames. Check selection strings and cutoffs."
+        ],
+        "effective_cutoffs": [
+          [
+            3.5
+          ]
+        ]
+      },
+      "explanation": "'distance: 5.0' on a shell node is ignored and a 3.5 A default is used silently",
+      "id": "R11",
+      "severity": "major",
+      "title": "Unknown/missing SOZ node params silently defaulted",
+      "seconds": 0.09
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "box_A": 16.0,
+        "cutoff_A": 12.0,
+        "warnings": [
+          "Topology has no chain IDs; PDB exports will use 'X'. Add chain IDs if you rely on chain-based selections.",
+          "Topology has no element information; element- or mass-based analyses and PDB parsing may be unreliable.",
+          "SOZ 'Z' largest cut-off 12.00 A exceeds half the shortest box width (8.00 A). The zone overlaps its own periodic images, so its volume is not the nominal sphere volume and occupancy saturates; reduce the cut-off or use a larger box.",
+          "SOZ 'Z': largest cut-off 12.00 A exceeds half the shortest box width (8.00 A at its smallest); the zone overlaps its own periodic images.",
+          "Topology has no chain IDs; PDB exports will use 'X'. Add chain IDs if you rely on chain-based selections."
+        ]
+      },
+      "explanation": "cutoff larger than half the box silently breaks the minimum-image convention",
+      "id": "R12",
+      "severity": "major",
+      "title": "Cutoff > half box not detected",
+      "seconds": 0.1
+    },
+    {
+      "reproduced": false,
+      "evidence": {
+        "QT_QPA_PLATFORM_after_import": "None",
+        "platform": "win32",
+        "stderr_tail": ""
+      },
+      "explanation": "importing app.main forces the X11 'xcb' plugin, which does not exist on Windows/macOS",
+      "id": "R13",
+      "severity": "major",
+      "title": "GUI cannot start off-Linux (forced xcb)",
+      "seconds": 0.11
+    }
+  ]
+}

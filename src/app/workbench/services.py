@@ -28,6 +28,31 @@ def _guess_probe(species: List[dict]) -> str:
     return "name O OW OH2"
 
 
+def describe_open_error(exc: Exception, topology: str, trajectory: Optional[str]) -> str:
+    """A message a researcher can act on (MDAnalysis errors are often empty or cryptic)."""
+    msg = str(exc).strip()
+    low = msg.lower()
+    names = os.path.basename(topology) + (f" + {os.path.basename(trajectory)}" if trajectory else "")
+    if "number of atoms" in low or "atoms in" in low and "!=" in low:
+        return f"The trajectory and the topology do not describe the same system ({msg}). Use the topology the trajectory was written from."
+    if isinstance(exc, (FileNotFoundError, IsADirectoryError)):
+        return msg or f"File not found: {names}"
+    ext = os.path.splitext(topology)[1] or "file"
+    vague = not msg or isinstance(exc, (StopIteration, EOFError, IndexError, UnicodeDecodeError, KeyError))
+    why = (f"the file is empty, truncated or not a valid {ext} file" if vague else msg)
+    return (f"Could not read {names}: {why}. Supported topologies: .gro .pdb .psf .prmtop/.parm7 .tpr .mol2 .xyz; "
+            "trajectories: .xtc .trr .dcd .nc .crd .trj .lammpstrj.")
+
+
+def open_universe(topology: str, trajectory: Optional[str]):
+    import MDAnalysis as mda
+
+    try:
+        return mda.Universe(topology, trajectory) if trajectory else mda.Universe(topology)
+    except Exception as exc:
+        raise ValueError(describe_open_error(exc, topology, trajectory)) from exc
+
+
 def scan_inputs(topology: str, trajectory: Optional[str]) -> Dict[str, object]:
     """Open the inputs and summarise everything the first screen needs. Raises with a readable message."""
     import MDAnalysis as mda
@@ -42,7 +67,7 @@ def scan_inputs(topology: str, trajectory: Optional[str]) -> Dict[str, object]:
             raise FileNotFoundError(f"Topology not found: {topology}")
         if trajectory and not os.path.isfile(trajectory):
             raise FileNotFoundError(f"Trajectory not found: {trajectory}")
-        u = mda.Universe(topology, trajectory) if trajectory else mda.Universe(topology)
+        u = open_universe(topology, trajectory)
         n_atoms, n_frames = len(u.atoms), len(u.trajectory)
         ts0 = u.trajectory[0]
         box = box_from_dimensions(ts0.dimensions)
@@ -115,11 +140,11 @@ class PreviewWorker(QtCore.QObject):
             summary = scan_inputs(topology, trajectory)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                self._u = mda.Universe(topology, trajectory) if trajectory else mda.Universe(topology)
+                self._u = open_universe(topology, trajectory)
             self._cache_key, self._solvent, self._sel_cache = None, None, {}
             self.loaded.emit(summary)
         except Exception as exc:
-            self.loadFailed.emit(str(exc))
+            self.loadFailed.emit(str(exc) or f"{type(exc).__name__} while reading the files")
 
     # --------------------------------------------------------------------------------------- helpers
     def _get_solvent(self, solvent_cfg: dict):
@@ -257,10 +282,32 @@ class PreviewWorker(QtCore.QObject):
                 state[inside & ~prev_mask[ord_sel]] = 2
                 state[(~inside) & prev_mask[ord_sel]] = 3
         labels = [solvent.record_by_resindex[int(lay.resindex_by_ord[o])].display_id for o in ord_sel]
+        # hydrogens of the displayed waters (3-atom molecules only), kept attached to their wrapped oxygen
+        hyd = None
+        if len(ks):
+            try:
+                n_atoms_mol = np.bincount(lay.all_owner, minlength=lay.n_solvent)
+                order = np.argsort(lay.all_owner, kind="stable")
+                starts = np.concatenate([[0], np.cumsum(n_atoms_mol)[:-1]])
+                hyd = np.full((len(ks), 2, 3), np.nan, dtype=np.float32)
+                for row, (k, o) in enumerate(zip(ks, ord_sel)):
+                    if n_atoms_mol[o] != 3:
+                        continue
+                    members = lay.all_idx[order[starts[o]: starts[o] + 3]]
+                    others = [a for a in members if a != lay.probe_idx[k]][:2]
+                    if len(others) == 2:
+                        o_true = pxyz[k]
+                        for j, a in enumerate(others):
+                            d = np.asarray(pos[a], dtype=np.float64) - o_true
+                            if box is not None:
+                                d = minimum_image(d[None, :], box)[0]
+                            hyd[row, j] = (wrapped[k] + d).astype(np.float32)
+            except Exception:
+                hyd = None
         return {
             "token": req["token"], "ok": True, "frame": frame, "time_ps": float(ts.time),
             "solute_xyz": sx.astype(np.float32), "solute_roles": roles,
-            "solvent_xyz": wrapped[ks].astype(np.float32), "solvent_state": state, "solvent_labels": labels,
+            "solvent_xyz": wrapped[ks].astype(np.float32), "solvent_h": hyd, "solvent_state": state, "solvent_labels": labels,
             "solvent_resindex": lay.resindex_by_ord[ord_sel].astype(np.int64),
             "box": None if box is None else np.asarray(box.dims, dtype=np.float64), "center": center.astype(np.float32),
             "n_in_zone": int(mask.sum()), "n_solvent_total": int(lay.n_solvent),

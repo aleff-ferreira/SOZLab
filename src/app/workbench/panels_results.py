@@ -15,7 +15,7 @@ from app.workbench.charts import (DensityChart, EventsChart, HistogramChart, Str
                                   TimelineChart)
 from app.workbench.session import Session
 from app.workbench.theme import Theme, set_prop
-from app.workbench.widgets import Chip, FlowLayout, Segmented, StatTile, make_label
+from app.workbench.widgets import Chip, FlowLayout, Segmented, StatTile, make_label, dispose
 
 Qt = QtCore.Qt
 
@@ -67,11 +67,17 @@ class TileGrid(QtWidgets.QWidget):
             self._grid.setColumnStretch(c, 1)
         for c in range(cols, 8):
             self._grid.setColumnStretch(c, 0)
+        # tiles have a fixed height; tell the parent layout how many rows there are now, or the rows would overlap
+        rows = -(-len(self.tiles) // cols)
+        th = self.tiles[0].minimumHeight() if self.tiles and self.tiles[0].minimumHeight() > 0 else _t().px(122)  # tiles are fixed-height
+        self.setFixedHeight(rows * th + (rows - 1) * self._grid.verticalSpacing() + 2)
+        self.updateGeometry()
 
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
         w = max(self.width(), 1)
-        self._place(int(max(2, min(len(self.tiles), w // _t().px(116)))))
+        sp = self._grid.horizontalSpacing()
+        self._place(int(max(2, min(len(self.tiles), (w + sp) // (_t().px(116) + sp)))))
 
 
 class ResultsPanel(QtWidgets.QWidget):
@@ -98,7 +104,8 @@ class ResultsPanel(QtWidgets.QWidget):
         self.t_visits = StatTile("Visits", "events", "visit", decimals=5)
         self.t_frames = StatTile("Frames analysed", "", None, decimals=6)
         self.t_frames.hide()  # shown in the settings strip instead
-        self.tiles = TileGrid([self.t_mean, self.t_occ, self.t_tau, self.t_rate, self.t_visits])
+        self.t_visits.hide()  # visit counts live in the Residence tab and in the residence tile's tooltip
+        self.tiles = TileGrid([self.t_mean, self.t_occ, self.t_tau, self.t_rate])
         lay.addWidget(self.tiles)
         # preview banner
         self.banner = make_label("", "caption", word_wrap=True)
@@ -111,6 +118,9 @@ class ResultsPanel(QtWidgets.QWidget):
         self.tabbar.setElideMode(Qt.TextElideMode.ElideNone)
         self.stack = QtWidgets.QStackedWidget()
         lay.addWidget(self.tabbar)
+        # tab contents adapt to the room there is (charts shrink, the residence table scrolls); they never force the pane taller
+        self.stack.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Ignored)
+        self.stack.setMinimumHeight(_t().px(150))
         lay.addWidget(self.stack, 1)
         # occupancy
         self.timeline = TimelineChart()
@@ -127,7 +137,12 @@ class ResultsPanel(QtWidgets.QWidget):
         res = QtWidgets.QSplitter(Qt.Orientation.Horizontal)
         res.addWidget(self.survival)
         self.res_info = self._info_panel()
-        res.addWidget(self.res_info[0])
+        info_scroll = QtWidgets.QScrollArea()
+        info_scroll.setWidgetResizable(True)
+        info_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        info_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        info_scroll.setWidget(self.res_info[0])
+        res.addWidget(info_scroll)
         res.setStretchFactor(0, 3)
         res.setStretchFactor(1, 2)
         res.setChildrenCollapsible(False)
@@ -192,6 +207,7 @@ class ResultsPanel(QtWidgets.QWidget):
         for t in self.tiles.tiles:
             t.clear()
         self.timeline.set_compare(None, None)
+        self.banner.setStyleSheet("")
         self.banner.setText("Numbers appear here after you run the analysis. Until then the chart shows a live preview of the zone you are defining.")
         self.banner.show()
         self._fill_strip(None)
@@ -222,7 +238,14 @@ class ResultsPanel(QtWidgets.QWidget):
         trust = result.qc_summary.get("trust", [])
         unit = s.get("time_unit", "ps")
         timing_ok = bool(result.qc_summary.get("timing", {}).get("trusted", True))
-        self.banner.hide()
+        if getattr(result, "complete", True):
+            self.banner.hide()
+        else:
+            done, total = result.qc_summary.get("frames_analysed"), result.qc_summary.get("total_frames")
+            self.banner.setText(f"PARTIAL RESULT: the run was cancelled after {done} of {total} frames. These numbers cover only those frames; "
+                                "do not quote them.")
+            self.banner.setStyleSheet(f"color: {_t().t['err']}; font-size: 12px; font-weight: 700;")
+            self.banner.show()
         mean_u = unc.get("mean_n_solvent") or {}
         self.t_mean.set_value(s["mean_n_solvent"], mean_u.get("se"), "molecules", trust_level(trust, ["occupancy.few", "occupancy.stride"]),
                               note=f"median {s['median_n_solvent']:g} · max {s['max_n_solvent']}")
@@ -243,6 +266,7 @@ class ResultsPanel(QtWidgets.QWidget):
         self.t_rate.set_value(rate if timing_ok else float("nan"), rate_u.get("se"), f"per {unit}", trust_level(trust, ["entries."]),
                               note="depends on Δt")
         nv, nc = int(res.get("n_visits", 0)), int(res.get("n_visits_complete", 0))
+        self.t_tau.setToolTip(f"{nv} visits observed: {nc} complete, {100 * res.get('fraction_censored', 0):.0f}% cut by the window edges")
         self.t_visits.set_value(float(nv), None, "events", trust_level(trust, ["residence.few", "residence.censored"]),
                                 note=f"{nc} complete · {100 * res.get('fraction_censored', 0):.0f}% cut")
         dt = s.get("dt", float("nan"))
@@ -293,19 +317,18 @@ class ResultsPanel(QtWidgets.QWidget):
             return "Stride sensitivity was not computed (enable it in Run settings → Advanced)."
         bits = []
         for row in sens[1:]:
-            ch = row.get("tau_survival_integral_rel_change")
-            ch2 = row.get("entry_rate_per_time_rel_change")
-            bits.append(f"{row['stride_multiplier']}× coarser: τ {ch:+.0%}" if _fin(ch) else f"{row['stride_multiplier']}× coarser: τ n/a")
+            ch, ch2 = row.get("tau_survival_integral_rel_change"), row.get("entry_rate_per_time_rel_change")
+            bit = f"{row['stride_multiplier']}× coarser: τ {ch:+.0%}" if _fin(ch) else f"{row['stride_multiplier']}× coarser: τ n/a"
             if _fin(ch2):
-                bits[-1] += f", entry rate {ch2:+.0%}"
-        verdict = "Changes above ~10% mean the number depends on the frame interval; quote it together with that interval."
-        return "  ·  ".join(bits) + "\n" + verdict
+                bit += f", rate {ch2:+.0%}"
+            bits.append(bit)
+        return "  ·  ".join(bits) + "\nOver ~10% means the value depends on Δt: quote it with its interval."
 
     def _fill_strip(self, result) -> None:
         while self.strip.count():
             it = self.strip.takeAt(0)
             if it.widget():
-                it.widget().deleteLater()
+                dispose(it.widget())
         if result is None:
             self.strip_host.hide()
             return
@@ -324,8 +347,6 @@ class ResultsPanel(QtWidgets.QWidget):
             if a.gap_tolerance_time:
                 bits.append(f"brief-exit tolerance {a.gap_tolerance_time:g} {unit}")
         chips.append(("frames", " · ".join(bits)))
-        prov = result.provenance or {}
-        chips.append(("ver", f"config {str(prov.get('config_sha256', ''))[:8]}"))
         timing = result.qc_summary.get("timing", {})
         if timing.get("source") != "trajectory":
             chips.append(("time", "time stamps assumed (1 ps/frame)" if timing.get("source") == "assumed" else f"time: {timing.get('source')}"))

@@ -81,12 +81,16 @@ class RunBar(QtWidgets.QFrame):
         self.stale = Chip("Settings changed since the last run", "warn")
         self.stale.hide()
         v.addWidget(self.stale, 0, Qt.AlignmentFlag.AlignLeft)
-        for sig in (session.issuesChanged, session.zoneChanged, session.settingsChanged, session.summaryReady, session.stepsChanged):
+        self._sticky = ""  # the outcome of the last run stays on screen until the user changes something
+        for sig in (session.issuesChanged, session.stepsChanged):
             sig.connect(lambda *_: self.refresh())
+        for sig in (session.zoneChanged, session.settingsChanged, session.summaryReady):
+            sig.connect(lambda *_: self._clear_sticky())
         session.runStarted.connect(self._on_started)
         session.runProgress.connect(self._on_progress)
         session.resultReady.connect(self._on_finished)
         session.runFailed.connect(self._on_failed)
+        session.runCancelled.connect(self._on_cancelled)
         self.refresh()
 
     def refresh(self) -> None:
@@ -102,6 +106,8 @@ class RunBar(QtWidgets.QFrame):
         errs = [i for i in s.issues() if i.level == "error"]
         if running:
             pass
+        elif self._sticky:
+            self.status.setText(self._sticky)
         elif s.summary is None:
             self.status.setText("Open a topology and trajectory to begin.")
         elif errs:
@@ -111,7 +117,12 @@ class RunBar(QtWidgets.QFrame):
         self.run_btn.setToolTip("Ctrl+R" if can else (errs[0].message if errs else "Open a topology and trajectory first"))
         self.stale.setVisible(s.is_stale() and not running)
 
+    def _clear_sticky(self) -> None:
+        self._sticky = ""
+        self.refresh()
+
     def _on_started(self) -> None:
+        self._sticky = ""
         self.progress.setRange(0, 0)
         self.status.setText("Starting…")
         self.refresh()
@@ -123,11 +134,15 @@ class RunBar(QtWidgets.QFrame):
         self.status.setText(msg)
 
     def _on_finished(self, result) -> None:
-        self.status.setText("Done." if getattr(result, "complete", True) else "Cancelled: the results shown are partial.")
+        self._sticky = "Done. Results are on the right; nothing is written until you export." if getattr(result, "complete", True)             else "Cancelled: the results shown are partial and are marked as such."
         self.refresh()
 
     def _on_failed(self, msg: str) -> None:
-        self.status.setText(f"The run failed: {msg}")
+        self._sticky = f"The run failed: {msg}"
+        self.refresh()
+
+    def _on_cancelled(self) -> None:
+        self._sticky = "Cancelled. Nothing was kept; change the settings or run again."
         self.refresh()
 
 
@@ -136,6 +151,7 @@ class StageView(QtWidgets.QFrame):
     """The 3D view plus frame transport. The slider walks the analysed frames; the timeline cursor follows."""
 
     frameChanged = QtCore.pyqtSignal(int)  # index into the analysis window
+    foldToggled = QtCore.pyqtSignal(bool)  # True = the 3D canvas is folded away (only the transport bar remains)
 
     def __init__(self, session: Session, parent=None):
         super().__init__(parent)
@@ -184,10 +200,16 @@ class StageView(QtWidgets.QFrame):
         self.shot = QtWidgets.QToolButton()
         set_prop(self.shot, "variant", "bar")
         self.shot.setToolTip("Save a picture of this view")
+        self.fold = QtWidgets.QToolButton()
+        set_prop(self.fold, "variant", "bar")
+        self.fold.setCheckable(True)
+        self.fold.setToolTip("Fold the 3D view away to give the charts the full height (and back)")
+        self.fold.toggled.connect(self._on_fold)
         bl.addWidget(self.play)
         bl.addWidget(self.slider, 1)
         bl.addWidget(self.readout)
         bl.addWidget(self.shot)
+        bl.addWidget(self.fold)
         v.addWidget(bar)
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(110)
@@ -208,8 +230,14 @@ class StageView(QtWidgets.QFrame):
         self.logo.setPixmap(icons.logo_pixmap(t.t["solvent"], t.t["solute"], 76))
         self.play.setIcon(icons.icon("pause" if self.play.isChecked() else "play", t.t["ink"], 18))
         self.shot.setIcon(icons.icon("camera", t.t["ink2"], 18))
+        self.fold.setIcon(icons.icon("chevron_down" if self.fold.isChecked() else "chevron_up", t.t["ink2"], 18))
         if hasattr(self.scene, "refresh_theme"):
             self.scene.refresh_theme()
+
+    def _on_fold(self, folded: bool) -> None:
+        self.stack.setVisible(not folded)
+        self.fold.setIcon(icons.icon("chevron_down" if folded else "chevron_up", _t().t["ink2"], 18))
+        self.foldToggled.emit(folded)
 
     def _enable(self, on: bool) -> None:
         for w in (self.play, self.slider, self.shot):
@@ -380,10 +408,18 @@ class WorkbenchWindow(QtWidgets.QMainWindow):
         sh = QtWidgets.QVBoxLayout(stage_host)
         sh.setContentsMargins(0, 12, 0, 0)
         sh.addWidget(self.stage)
-        res_host = QtWidgets.QWidget()
-        rh = QtWidgets.QVBoxLayout(res_host)
-        rh.setContentsMargins(0, 0, 0, 12)
+        # the results scroll vertically when the window is too short for them (they are never squeezed into overlapping)
+        res_host = QtWidgets.QScrollArea()
+        res_host.setWidgetResizable(True)
+        res_host.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        res_host.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        res_inner = QtWidgets.QWidget()
+        res_inner.setObjectName("Transparent")
+        rh = QtWidgets.QVBoxLayout(res_inner)
+        rh.setContentsMargins(0, 0, 4, 12)
         rh.addWidget(self.results)
+        res_host.setWidget(res_inner)
+        self.results_scroll = res_host
         centre.addWidget(stage_host)
         centre.addWidget(res_host)
         centre.setStretchFactor(0, 5)
@@ -405,10 +441,10 @@ class WorkbenchWindow(QtWidgets.QMainWindow):
         self.body.addWidget(centre)
         self.body.addWidget(right)
         self.body.setStretchFactor(1, 1)
-        self.body.setSizes([410, 640, 316])
-        left.setMinimumWidth(_t().px(392))
+        self.body.setSizes([418, 632, 316])
+        left.setMinimumWidth(_t().px(404))
         left.setMaximumWidth(_t().px(540))
-        right.setMinimumWidth(_t().px(290))
+        right.setMinimumWidth(_t().px(304))
         right.setMaximumWidth(_t().px(460))
         outer.addWidget(self.body, 1)
         outer.addWidget(self._build_statusbar())
@@ -518,6 +554,7 @@ class WorkbenchWindow(QtWidgets.QMainWindow):
             None if snap is None else snap.times_ps, None if snap is None else snap.n_solvent))
         self.results.cursorMoved.connect(self.stage.set_index)
         self.stage.frameChanged.connect(self.results.set_cursor)
+        self.stage.foldToggled.connect(self._fold_stage)
         self.theme.changed.connect(self._on_theme)
         # live preview: any change to the zone or settings refreshes the scene and the occupancy preview
         self._preview_timer = QtCore.QTimer(self)
@@ -615,7 +652,24 @@ class WorkbenchWindow(QtWidgets.QMainWindow):
         self.project_chip.set(" + ".join(names), "accent")
         self.project_chip.setToolTip("\n".join(p for p in (summary["topology"], summary["trajectory"]) if p))
         self.status_label.setText(f"{summary['n_atoms']:,} atoms · {summary['n_frames']:,} frames")
-        QtCore.QTimer.singleShot(60, lambda: self.left_scroll.verticalScrollBar().setValue(max(0, self.zone_card.y() - 14)))
+        QtCore.QTimer.singleShot(60, self._scroll_to_zone)
+
+    def _fold_stage(self, folded: bool) -> None:
+        sizes = self.centre.sizes()
+        total = sum(sizes)
+        if folded:
+            self._stage_sizes = sizes
+            bar = self.stage.minimumSizeHint().height() + 12
+            self.centre.setSizes([bar, max(total - bar, 1)])
+        else:
+            prev = getattr(self, "_stage_sizes", None)
+            self.centre.setSizes(prev if prev and sum(prev) > 0 else [290, max(total - 290, 1)])
+
+    def _scroll_to_zone(self) -> None:
+        try:  # the window may be gone by the time the timer fires
+            self.left_scroll.verticalScrollBar().setValue(max(0, self.zone_card.y() - 14))
+        except RuntimeError:
+            pass
 
     def _on_result(self, result) -> None:
         if not getattr(result, "complete", True):

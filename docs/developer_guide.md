@@ -1,76 +1,70 @@
-# SOZLab Developer Guide
+# SOZLab developer guide
 
-## Repository layout
-- `src/engine/`: analysis engine, models, export/report, extraction, validation
-- `src/app/`: PyQt6 GUI (`main.py`) and 3D density viewer (`viz_3d.py`)
-- `cli/`: CLI entry point (`cli/sozlab_cli.py`)
-- `examples/`: template project JSON and SOZ JSON snippets
-- `tests/`: unit/integration/gui tests
-- `docs/`: user/developer/tutorial docs
+## Layout
 
-## Runtime entry points
-- GUI script: `sozlab-gui` -> `app.main:main`
-- CLI script: `sozlab-cli` -> `cli.sozlab_cli:main`
-
-CLI commands:
-- `run`
-- `validate`
-- `extract`
-
-## Current exposed feature set
-UI and CLI currently expose:
-- SOZ occupancy analysis
-- density maps + density explorer (2D/3D)
-- export/report/extraction
-
-These analysis families are currently stripped on project load/run:
-- `hbond_hydration`
-- `water_dynamics`
-
-Code references:
-- GUI stripping: `src/app/main.py` (`_strip_removed_analysis_options`)
-- CLI stripping: `cli/sozlab_cli.py` (`_strip_removed_analysis_options`)
-
-## Development setup
-```bash
-conda env create -f environment.yml
-conda activate sozlab
-pip install -e .
+```
+src/engine/    analysis engine (no GUI imports)
+  analysis.py    SOZAnalysisEngine: preflight -> frame loop -> statistics -> density -> trust -> result
+  frames.py      per-frame evaluation, serial or process-parallel, results accumulated in frame order (bitwise = serial)
+  soz_eval.py    zone logic tree (distance / shell / and / or / not)
+  solvent.py     solvent layout, probes, whole-molecule handling
+  periodic.py    boxes, minimum image, triclinic
+  timing.py      FrameTiming: time source, uniformity, midpoint-rule intervals
+  stats.py       StatsAccumulator: per-frame / per-molecule / visits / survival / stride sensitivity
+  residence.py   visits, censoring, survival, Kaplan-Meier        uncertainty.py  autocorrelation and block errors
+  density.py     solute-frame density engine, content-keyed cache
+  provenance.py  fingerprints, configuration hash, environment    export.py, report.py, extract.py, dictionary.py, trust.py
+  synthetic.py   systems with analytically known answers          selftest.py     the checks behind `sozlab-cli selftest`
+src/app/       PyQt6 front end
+  main.py        entry point (`sozlab-gui`)
+  workbench/     theme.py (tokens, QSS) · icons.py · widgets.py · charts.py · viewport3d.py (software 3D) ·
+                 model.py (zone/run specs -> project) · services.py (background threads) · session.py (state, validation, history) ·
+                 panels_left.py / panels_results.py / panels_right.py · window.py
+cli/           sozlab_cli.py: run / validate / extract / verify / selftest
+tests/         engine tests, tests/gui (pytest-qt, offscreen), tests/integration (CLI)
+bench/         repro/ (v2.0 flaws), validate/ (reference systems), data/ (OpenMM generator), gui/ (usability harness)
+docs/          user guide, science definitions, evidence
 ```
 
-## Testing
-Quick default run:
+## Design rules
+
+- **The window renders `Session`; it does not own state.** Tests drive the same `Session` methods the widgets call, so GUI behaviour is
+  checkable without pixels. Anything that touches an MDAnalysis `Universe` runs off the GUI thread with its own `Universe`.
+- **One engine, two front ends.** The Workbench builds a `ProjectConfig` and calls `SOZAnalysisEngine`; the CLI loads the same JSON.
+  `tests/gui/test_gui_cli_agreement.py` fails if the per-frame solvent identities, summaries or configuration hash ever differ.
+- **A number is never separated from its definition.** New quantities get an entry in `engine/dictionary.py` (shown in the GUI, the export and
+  the docs) and, if they have a failure mode, a rule in `engine/trust.py`.
+- **Bump `ALGORITHM_VERSIONS` when a definition changes**; it is part of every cache key and every provenance record.
+- **Parallel results must equal serial results exactly**; add a case to `tests/test_pipeline_known_answers.py` for any new per-frame output.
+
+## Tests
+
 ```bash
-python -m pytest -q
+python -m pytest -q                       # everything not marked slow (GUI tests run offscreen)
+python -m pytest -q tests/gui             # Workbench only
+sozlab-cli selftest                       # the known-answer checks, on an installed copy
 ```
 
-Markers:
-- `unit`
-- `integration`
-- `gui`
-- `slow`
+Known-answer tests use `engine/synthetic.py`: scripted occupancy, ideal gas (exact oracle), overdamped Brownian dynamics (analytic survival
+with the discrete-monitoring correction), molecules split across the box, a rotating solute. They compare against brute-force oracles that
+share no code with the engine.
 
-Quick profile:
+## Reproducing the evidence
+
 ```bash
-python -m pytest -q -m "not slow"
+pip install -e ".[test,validation]"
+python bench/repro/repro_v2_flaws.py --label fixed --out bench/out/repro_fixed.json        # 13 flaws of v2.0.0, measured
+git worktree add .baseline 3dcf498                                                         # the released v2.0.0
+PYTHONPATH=.baseline/src python bench/repro/repro_v2_flaws.py --label baseline --out bench/out/repro_baseline.json
+python bench/data/make_tip3p_box.py --out bench/out/tip3p --replicas 4 --ns 2.0 --dt-out 0.2          # OpenMM, fixed seeds
+python bench/data/make_tip3p_box.py --out bench/out/tip3p_fine --replicas 1 --ns 0.4 --dt-out 0.02
+python bench/validate/tip3p_validation.py && python bench/validate/dt_extrapolation.py
+python bench/validate/perf_compare.py --label v2.1 --what soz                              # and with PYTHONPATH=.baseline/src
 ```
 
-Full profile:
-```bash
-python -m pytest -q -m "slow or not slow"
-```
+Results land in `docs/evidence/data/`. Trajectories are not committed; `meta.json` holds their SHA-256 sums.
 
-## Docs maintenance workflow
-When updating docs, treat these as source of truth:
-- CLI: `cli/sozlab_cli.py` + live `--help` output
-- GUI structure/labels: `src/app/main.py`
-- 3D viewer controls: `src/app/viz_3d.py`
-- output artifacts: `src/engine/export.py`, `src/engine/extract.py`, `src/engine/report.py`
+## Packaging
 
-Recommended docs verification commands:
-```bash
-sozlab-cli --help
-sozlab-cli run --help
-sozlab-cli validate --help
-sozlab-cli extract --help
-```
+`pyproject.toml` lists `app`, `app.workbench`, `engine` and `cli`. The GUI needs only PyQt6 and pyqtgraph (no WebEngine, no OpenGL): the 3D view
+is a numpy/QPainter renderer, so it behaves the same on a remote desktop or a machine without a GPU.

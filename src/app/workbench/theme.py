@@ -14,17 +14,17 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 DARK: Dict[str, str] = {
     "bg0": "#080F1D", "bg1": "#0D1729", "bg2": "#132038", "bg3": "#1A2A47", "line": "#233556", "line2": "#2E4470",
-    "ink": "#E9F1FB", "ink2": "#A8B9D1", "ink3": "#6B819F",
+    "ink": "#E9F1FB", "ink2": "#A8B9D1", "ink3": "#7489A5",
     "solvent": "#35E0C8", "solvent_dim": "#1B7F76", "solute": "#FF8A5B", "solute_dim": "#9B4F31",
     "accent": "#7AA7FF", "accent_hi": "#A9C4FF", "accent_ink": "#07122B",
     "ok": "#4ADE80", "warn": "#FBBF24", "err": "#FB7185", "shadow": "#000000",
 }
 LIGHT: Dict[str, str] = {
     "bg0": "#F3F0E8", "bg1": "#FAF8F3", "bg2": "#FFFFFF", "bg3": "#EEE9DD", "line": "#DDD5C4", "line2": "#C9BFA9",
-    "ink": "#13233B", "ink2": "#44566F", "ink3": "#7A8AA1",
-    "solvent": "#0E9F8E", "solvent_dim": "#7FCBC2", "solute": "#D9531E", "solute_dim": "#EBA98D",
-    "accent": "#2F6BFF", "accent_hi": "#1C4FD6", "accent_ink": "#FFFFFF",
-    "ok": "#15803D", "warn": "#B45309", "err": "#BE123C", "shadow": "#1B2A44",
+    "ink": "#13233B", "ink2": "#44566F", "ink3": "#626E81",
+    "solvent": "#0B7A6D", "solvent_dim": "#7FCBC2", "solute": "#BB471A", "solute_dim": "#EBA98D",
+    "accent": "#2B62EB", "accent_hi": "#1C4FD6", "accent_ink": "#FFFFFF",
+    "ok": "#157D3C", "warn": "#B05109", "err": "#BE123C", "shadow": "#1B2A44",
 }
 
 UI_STACK = ["Segoe UI Variable Text", "Inter", "SF Pro Text", "Helvetica Neue", "Noto Sans", "DejaVu Sans"]

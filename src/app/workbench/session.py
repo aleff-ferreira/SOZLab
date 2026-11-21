@@ -75,6 +75,7 @@ class Session(QtCore.QObject):
     runProgress = QtCore.pyqtSignal(int, int, str)
     resultReady = QtCore.pyqtSignal(object)
     runFailed = QtCore.pyqtSignal(str)
+    runCancelled = QtCore.pyqtSignal()
     taskProgress = QtCore.pyqtSignal(str, int, int, str)
     taskDone = QtCore.pyqtSignal(str, object)
     taskFailed = QtCore.pyqtSignal(str, str)
@@ -381,16 +382,26 @@ class Session(QtCore.QObject):
         def job(progress, cancelled):
             from engine.logging_utils import setup_run_logger
 
+            from engine.analysis import RunCancelledError
+
             logger, _ = setup_run_logger(project.outputs.output_dir)
-            return SOZAnalysisEngine(project).run(progress=progress, cancel_flag=cancelled, logger=logger, command_line=cmd)
+            try:
+                return SOZAnalysisEngine(project).run(progress=progress, cancel_flag=cancelled, logger=logger, command_line=cmd)
+            except RunCancelledError:
+                return None  # cancelled before the first frame: nothing to show, and not an error
 
         self.runner.start(job)
 
     def cancel_run(self) -> None:
         self.runner.cancel()
 
-    def _on_run_finished(self, result: AnalysisResult) -> None:
+    def _on_run_finished(self, result: Optional[AnalysisResult]) -> None:
         self.running = False
+        if result is None:
+            self.message.emit("Run cancelled before any frame was analysed; nothing was kept.", "info")
+            self.runCancelled.emit()
+            self.stepsChanged.emit()
+            return
         self.result = result
         if result.complete and result.soz_results:
             self._add_snapshot(result)
@@ -501,36 +512,40 @@ class Session(QtCore.QObject):
 
     # ------------------------------------------------------------------------------------ project files
     def save_project(self, path: str) -> None:
+        """One file format for both front ends: a plain SOZLab project (what ``sozlab-cli run --project`` reads) plus a
+        ``workbench`` block holding the Workbench's own state (zone chips, advanced settings). The CLI ignores the block."""
+        data = self.build_project().to_dict()
+        data["workbench"] = {"version": 1, "zone": dict(self.zone.__dict__), "solvent": dict(self.solvent.__dict__),
+                             "run": dict(self.run.__dict__)}
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"sozlab_workbench": 1, "project": self.build_project().to_dict(), "zone": self.zone.__dict__,
-                       "solvent": self.solvent.__dict__, "run": self.run.__dict__}, handle, indent=2, default=str)
+            json.dump(data, handle, indent=2, default=str)
 
     def load_project(self, path: str) -> None:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
-        if "sozlab_workbench" in data:
-            for k, v in data["zone"].items():
-                setattr(self.zone, k, v)
-            for k, v in data["solvent"].items():
-                setattr(self.solvent, k, v)
-            for k, v in data["run"].items():
-                setattr(self.run, k, v)
-            inp = data["project"]["inputs"]
-        else:  # a plain SOZLab project file (CLI / v2.0)
+        wb = data.get("workbench")
+        if wb:
+            for obj, key in ((self.zone, "zone"), (self.solvent, "solvent"), (self.run, "run")):
+                for k, v in (wb.get(key) or {}).items():
+                    if hasattr(obj, k):
+                        setattr(obj, k, v)
+        else:  # a plain SOZLab project (CLI / v2.0)
             from engine.models import ProjectConfig as PC
 
             proj = PC.from_dict(data)
-            inp = proj.inputs.to_dict()
             if proj.sozs:
                 root = proj.sozs[0].root
                 sel_label = root.params.get("selection_label")
                 if sel_label in proj.selections:
                     self.zone.anchor = proj.selections[sel_label].selection or ""
-                self.zone.cutoff = float(root.params.get("cutoff", root.params.get("cutoffs", [3.5])[0]))
-            self.solvent.resnames = proj.solvent.water_resnames
+                cut = root.params.get("cutoff", (root.params.get("cutoffs") or [3.5])[0])
+                self.zone.cutoff = float(cut)
+                self.zone.name = proj.sozs[0].name
+            self.solvent.resnames = list(proj.solvent.water_resnames)
             self.solvent.probe_selection = proj.solvent.probe.selection
             self.run.stride, self.run.frame_start, self.run.frame_stop = proj.analysis.stride, proj.analysis.frame_start, proj.analysis.frame_stop
             self.run.output_dir = proj.outputs.output_dir
+        inp = data["inputs"]
         self.open_inputs(inp["topology"], inp.get("trajectory"))
 
     def shutdown(self) -> None:

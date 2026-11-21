@@ -55,8 +55,19 @@ def integrated_autocorr_time(x: Sequence[float], c: float = 5.0) -> Tuple[float,
     return float(max(taus[m], 1.0)), m
 
 
-def mean_with_error(x: Sequence[float]) -> Dict[str, float]:
-    """Mean with an autocorrelation-aware standard error and 95% interval."""
+def mean_with_error(x: Sequence[float], n_blocks: int = 5) -> Dict[str, float]:
+    """Mean with a conservative, autocorrelation-aware standard error and 95% interval.
+
+    Two estimates of the standard error of a time average are computed and the larger is reported:
+
+    * the integrated autocorrelation time (Sokal's automatic windowing), exact for a stationary process whose
+      correlations decay inside the run;
+    * contiguous blocks treated as independent replicas, which also sees slow variation that the windowed
+      autocorrelation misses when a small slow component hides behind a fast one.
+
+    On 4 x 2 ns of TIP3P/NaCl (docs/evidence) the autocorrelation estimate alone covered the long-run mean in only 75% of
+    0.25 ns windows; taking the larger of the two raised that to 91% without changing it for long runs.
+    """
     arr = np.asarray(x, dtype=np.float64)
     n = int(arr.size)
     if n == 0:
@@ -68,10 +79,18 @@ def mean_with_error(x: Sequence[float]) -> Dict[str, float]:
                 "n": n, "n_eff": float(n), "tau_int": 1.0}
     g, _ = integrated_autocorr_time(arr)
     n_eff = n / g
-    se = float(arr.std(ddof=1) * np.sqrt(g / n))
-    half = _t_crit(max(n_eff - 1.0, 1.0)) * se
+    se_acf = float(arr.std(ddof=1) * np.sqrt(g / n))
+    se, dof, method = se_acf, max(n_eff - 1.0, 1.0), "autocorrelation"
+    se_blk = float("nan")
+    if n >= 10 * n_blocks:
+        means = np.array([arr[a:b].mean() for a, b in block_ranges(n, n_blocks)])
+        se_blk = float(means.std(ddof=1) / np.sqrt(len(means)))
+        if se_blk > se_acf:
+            se, dof, method = se_blk, float(len(means) - 1), "blocks"
+    half = _t_crit(dof) * se
     return {"value": mean, "se": se, "ci95_low": mean - half, "ci95_high": mean + half,
-            "n": n, "n_eff": float(n_eff), "tau_int": float(g)}
+            "n": n, "n_eff": float(n_eff), "tau_int": float(g), "se_autocorrelation": se_acf, "se_blocks": se_blk,
+            "se_method": method}
 
 
 def block_ranges(n: int, n_blocks: int) -> Sequence[Tuple[int, int]]:

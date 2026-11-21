@@ -24,25 +24,22 @@ dependencies = [
   "scipy>=1.11",
   "pandas==2.2.2",
   "PyQt6>=6.5,<6.8",
-  "PyQt6-WebEngine>=6.5,<6.8",
   "pyqtgraph==0.13.7",
   "matplotlib==3.9.2",
-  "pyyaml==6.0.2",
-  "PyOpenGL>=3.1.0",
-  "scikit-image>=0.21.0"
+  "pyyaml==6.0.2"
 ]
 
 [project.optional-dependencies]
 parquet = ["pyarrow==17.0.0"]
 test = ["pytest>=8", "pytest-timeout", "pytest-qt"]
-validation = ["MDAnalysisTests==2.9.0", "openmm>=8.1"]
+validation = ["MDAnalysisTests==2.9.0", "openmm>=8.1", "waterdynamics>=1.2"]
 
 [project.scripts]
 sozlab-gui = "app.main:main"
 sozlab-cli = "cli.sozlab_cli:main"
 
 [tool.setuptools]
-packages = ["app", "engine", "cli"]
+packages = ["app", "app.workbench", "engine", "cli"]
 package-dir = {"app" = "src/app", "engine" = "src/engine", "cli" = "cli"}
 
 [tool.setuptools.dynamic]

@@ -12,7 +12,7 @@ from app.workbench import icons
 from app.workbench.panels_left import IssueList
 from app.workbench.session import Issue, Session, Snapshot
 from app.workbench.theme import Theme, set_prop
-from app.workbench.widgets import Card, Chip, DefinitionPopup, FlowLayout, Segmented, make_label
+from app.workbench.widgets import Card, Chip, DefinitionPopup, FlowLayout, Segmented, make_label, dispose
 
 Qt = QtCore.Qt
 
@@ -128,7 +128,7 @@ class HistoryPanel(QtWidgets.QWidget):
         while self.host.count():
             it = self.host.takeAt(0)
             if it.widget():
-                it.widget().deleteLater()
+                dispose(it.widget())
         snaps = list(reversed(self.session.snapshots))
         self.empty.setVisible(not snaps)
         for sn in snaps:
@@ -178,7 +178,7 @@ class HistoryPanel(QtWidgets.QWidget):
         while self.delta_lay.count():
             it = self.delta_lay.takeAt(0)
             if it.widget():
-                it.widget().deleteLater()
+                dispose(it.widget())
         snaps = self.session.snapshots
         other = next((s for s in snaps if s.id == self._cmp), None)
         if other is None or len(snaps) < 2:

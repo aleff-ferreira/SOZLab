@@ -4,24 +4,34 @@
 per-frame *state* drives their look (0 bulk / 1 in zone / 2 just entered / 3 just left), a weighted density cloud
 rendered as soft volumetric glow, the periodic cell, an axes gizmo, a scale bar in angstrom and a small HUD.
 
-Rendering model (numpy + QPainter/QImage only):
+Rendering model (numpy + QPainter/QImage only, nothing per atom in Python):
 
-* every point is projected once per camera/data version with numpy (perspective, rotation from a quaternion);
+* every point is projected once per camera/data version with numpy (perspective, rotation from a quaternion;
+  results are cached so hovering never re-renders);
 * opaque spheres (solute atoms, solvent O/H) are splatted as pre-shaded disc sprites into ONE packed ``uint32``
-  buffer ``(depth16 << 16) | lut_index16`` using an exact z-test.  Sprites are processed near -> far in growing
-  stages and hidden sprites are culled with a cheap 5-point visibility test, so a 30k atom globule costs about
-  the same as its visible surface.  The LUT (colour class x fog level x shade) is resolved in one gather;
-* silhouettes are anti-aliased with a small coverage filter (final quality only);
-* the density cloud and the zone halos are accumulated into a low-resolution float grid (bilinear splat),
-  blurred, tone-mapped and composited by Qt (additive on dark backgrounds, multiply on light ones), occluded
-  by the opaque depth buffer;
-* overlays (box, gizmo, scale bar, HUD, rings, hover) are drawn with anti-aliased QPainter calls.
+  buffer ``(depth16 << 16) | lut_index16`` with an exact z-test.  Sprites are processed near -> far in growing
+  stages and sprites hidden at all 17 sample points are culled, so a dense 30k-atom globule costs about as much as
+  its visible surface.  The LUT (colour class x depth fog x shade) is resolved with one gather;
+* silhouettes and sprite contours are anti-aliased with cheap coverage/depth-edge filters (final quality only);
+* the density cloud and the zone / anchor halos are accumulated into a coarse float grid (bilinear splat),
+  blurred, tone mapped and composited by Qt - screen blend on dark backgrounds, multiply on light ones - split
+  into a layer behind and a layer in front of the opaque spheres (so a cloud behind the solute glows around its
+  silhouette), with the "focus" spheres (anchors, zone waters) cut out so they keep their colour;
+* overlays (box, gizmo, scale bar, HUD, pulse rings, hover) are anti-aliased QPainter drawings.
 
-While the user interacts the scene is drawn at reduced density / resolution and re-rendered at full quality
-~120 ms after the last interaction.  All colours derive from the theme tokens given to ``set_theme``.
+While the user interacts (rotate / zoom / pan / camera animation) the scene is drawn with fewer points and at a
+reduced resolution chosen by a small feedback loop (target ~30 ms per frame) and re-rendered at full quality
+~120 ms after the last interaction.  All colours derive from the tokens given to ``set_theme``.
+
+Conventions: world units are Angstrom.  The camera keeps a world->view rotation quaternion (view x right, y up,
+z towards the viewer), a target point (screen centre), a perspective distance and ``zoom`` in 1/Angstrom relative
+to the SHORT viewport side, so a saved camera state is independent of the widget size.  Known limits: at most
+80,000 density points and 400 pulse rings are drawn; the solute is subsampled to <= 12,000 atoms while the mouse
+is moving; sprites are flat-depth discs (no sphere/sphere intersection curves) and capped at 160 px radius.
 """
 from __future__ import annotations
 
+import functools
 import math
 import sys
 import time
@@ -52,10 +62,30 @@ _CHUNK = 24000                       # max fragments per numpy batch (keeps temp
 _SETTLE_MS = 120                     # full-quality redraw delay after the last interaction
 _INTERACTIVE_SOLUTE = 12000
 _INTERACTIVE_DENSITY = 15000
+# adaptive interaction quality: (render scale, point-budget level); level 0 = 12k solute / 15k density points
+_LEVELS = ((1.0, 0), (0.85, 0), (0.85, 1), (0.7, 1), (0.7, 2), (0.55, 2), (0.45, 2), (0.36, 2))
+_LOD_FRAC = (1.0, 0.66, 0.42)
+_TARGET_MS = 30.0
 _MAX_DENSITY = 80000
 _MAX_RINGS = 400
 _SOLUTE_RADIUS_SCALE = 0.86          # display radius = given radius * this (keeps atoms legible)
 _NEAR_FRAC = 0.12                    # near clip plane as a fraction of the camera distance
+_GLOW_SIGMA_REL = 0.62               # density blob sigma = this * voxel spacing
+_GLOW_GAIN_DENSITY = 0.13
+_GLOW_GAIN_HALO = 0.15
+_GLOW_GAIN_ANCHOR = 0.05
+_GLOW_HALO_SIGMA = 0.95              # Angstrom
+_GLOW_ANCHOR_SIGMA = 1.35
+_GLOW_DEPTH_K = 1.5                  # front-to-back attenuation across the cloud's own depth extent
+_GLOW_FRONT_MARGIN = 2.0             # Angstrom: sources this close behind the nearest sprite still count as in front
+_ANCHOR_T = 1.75                     # ramp position of the anchor halo (coral family, upper half of the ramp)
+_BLOOM_ADD = 0.40
+_BLOOM_MUL = 0.35
+# visibility sample points of the sprite cull, as fractions of the sprite radius (dx, dy)
+_CULL_PATTERN = ((0.5, 0.0), (-0.5, 0.0), (0.0, 0.5), (0.0, -0.5), (0.45, 0.45), (-0.45, 0.45), (0.45, -0.45),
+                 (-0.45, -0.45), (0.86, 0.0), (-0.86, 0.0), (0.0, 0.86), (0.0, -0.86), (0.62, 0.62), (-0.62, 0.62),
+                 (0.62, -0.62), (-0.62, -0.62))
+_CULL_REACH = 0.88
 _ISO_ANGLES = (math.radians(27.0), math.radians(-38.0))   # (pitch about x, yaw about y) of the default view
 
 # colour classes of the sprite LUT
@@ -64,11 +94,26 @@ _ISO_ANGLES = (math.radians(27.0), math.radians(-38.0))   # (pitch about x, yaw 
 _NCLS = 12
 
 # solvent state -> display radius (Angstrom) and colour class of the oxygen / hydrogen sprite
-_RO = np.array([0.60, 1.02, 1.14, 0.70], np.float32)
-_RH = np.array([0.34, 0.44, 0.46, 0.30], np.float32)
+_RO = np.array([0.52, 1.02, 1.14, 0.70], np.float32)
+_RH = np.array([0.30, 0.44, 0.46, 0.30], np.float32)
 _CLS_O = np.array([C_BULK_O, C_ZONE_O, C_ENTER_O, C_GHOST], np.int32)
 _CLS_H = np.array([C_BULK_H, C_ZONE_H, C_ENTER_H, C_GHOST], np.int32)
 _STATE_NAMES = ("bulk", "in zone", "entered", "left")
+
+
+def _guarded(fn):
+    """Event handlers / timer slots must never raise (PyQt would abort the process): log and carry on."""
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except Exception:                                   # pragma: no cover - defensive
+            self._last_error = traceback.format_exc()
+            print(self._last_error, file=sys.stderr)
+            return None
+
+    return wrapper
 
 
 def _scatter_is_ordered() -> bool:
@@ -334,16 +379,16 @@ class _Theme:
         self.fog = fog
 
         # ---- sphere colour classes (all derived from tokens)
-        sol = _mix(ink2, bg_mid, 0.10 if dark else 0.06)
+        sol = _mix(_mix(ink2, c["accent"], 0.28), bg_mid, 0.16 if dark else 0.06)
         anchor = _tint(c["solute"], 0.10)
         specs: List[Optional[_ClsSpec]] = [None] * _NCLS
-        specs[C_SOL0] = _ClsSpec(sol, 0.78, 0.55, 0.20 if dark else 0.34)
-        specs[C_SOL1] = _ClsSpec(_tint(sol, 0.10), 0.78, 0.55, 0.20 if dark else 0.34)
-        specs[C_SOL2] = _ClsSpec(_shade(sol, 0.10), 0.78, 0.55, 0.20 if dark else 0.34)
+        specs[C_SOL0] = _ClsSpec(sol, 0.74, 0.42, 0.20 if dark else 0.34)
+        specs[C_SOL1] = _ClsSpec(_tint(sol, 0.09), 0.74, 0.42, 0.20 if dark else 0.34)
+        specs[C_SOL2] = _ClsSpec(_shade(sol, 0.09), 0.74, 0.42, 0.20 if dark else 0.34)
         specs[C_ANCHOR] = _ClsSpec(anchor, 0.38, 0.80, 0.26)
         specs[C_DIM] = _ClsSpec(_mix(sol, bg_mid, 0.55), 0.70, 0.22, 0.30)
-        specs[C_BULK_O] = _ClsSpec(_mix(c["solvent"], bg_mid, 0.52 if dark else 0.38), 0.55, 0.35, 0.30)
-        specs[C_BULK_H] = _ClsSpec(_mix(ink3, bg_mid, 0.40), 0.55, 0.25, 0.30)
+        specs[C_BULK_O] = _ClsSpec(_mix(c["solvent"], bg_mid, 0.70 if dark else 0.58), 0.75, 0.30, 0.32)
+        specs[C_BULK_H] = _ClsSpec(_mix(ink3, bg_mid, 0.55), 0.75, 0.20, 0.32)
         specs[C_ZONE_O] = _ClsSpec(_tint(c["solvent"], 0.10 if dark else 0.0), 0.30, 0.95, 0.26)
         specs[C_ZONE_H] = _ClsSpec(_tint(c["solvent"], 0.62 if dark else 0.55), 0.30, 0.70, 0.30)
         specs[C_ENTER_O] = _ClsSpec(_tint(_mix(c["ok"], c["solvent"], 0.25), 0.45 if dark else 0.25), 0.20, 0.95, 0.30)
@@ -354,17 +399,28 @@ class _Theme:
 
         # ---- density glow ramp (value 0..1 -> colour) and blend mode
         if dark:
-            c0 = _shade(_mix(c["accent"], (0.10, 0.22, 0.85), 0.35), 0.42)         # deep blue
+            c0 = _shade(c["accent"], 0.52)                                         # deep blue
             c1 = c["solvent"]                                                      # aquamarine
             c2 = _tint(_mix(ink, c["warn"], 0.20), 0.22)                           # warm white
         else:
             c0 = _tint(c["solvent"], 0.55)                                         # pale aqua
             c1 = _shade(c["solvent"], 0.12)                                        # teal
             c2 = _mix(c["accent"], ink, 0.55)                                      # deep indigo
-        tt = np.linspace(0.0, 1.0, 256)
-        stops = np.array([0.0, 0.5, 1.0])
-        self.ramp = np.stack([np.interp(tt, stops, [c0[i], c1[i], c2[i]]) for i in range(3)], axis=1).astype(np.float32)
+        # ramp over t in [0, 2]: [0, 1] density (low -> high), (1, 2] the coral family used by anchor halos
+        if dark:
+            c3 = _tint(c["solute"], 0.30)
+            c4 = c["solute"]
+            c5 = _shade(c["solute"], 0.25)
+        else:
+            c3 = _mix(c["accent"], c["solute"], 0.5)
+            c4 = c["solute"]
+            c5 = _shade(c["solute"], 0.30)
+        tt = np.linspace(0.0, 2.0, 512)
+        stops = np.array([0.0, 0.5, 1.0, 1.35, 1.75, 2.0])
+        cols = [c0, c1, c2, c3, c4, c5]
+        self.ramp = np.stack([np.interp(tt, stops, [cc[i] for cc in cols]) for i in range(3)], axis=1).astype(np.float32)
         self.glow_add = dark
+        self.tone = self._build_tone_lut()
 
         # ---- overlay colours
         self.q = {k: _qcol(v) for k, v in c.items()}
@@ -373,6 +429,25 @@ class _Theme:
         self.plate_line = _qcol(c["line"], 0.85)
         self.shadow_col = _qcol(bg_mid * (0.4 if dark else 1.0), 0.85)
         self.axis_cols = (_qcol(c["err"]), _qcol(c["ok"]), _qcol(c["accent"]))
+
+    # accumulated glow energy range covered by the tone LUT (quantised with a sqrt law: fine steps in the dark)
+    TONE_AMAX = 3.6
+    TONE_GAIN_ADD = 1.55
+    TONE_GAIN_MUL = 2.4
+
+    def _build_tone_lut(self) -> np.ndarray:
+        """256 x 512 LUT: [energy level, ramp position] -> opaque 0xFFRRGGBB of the glow layer.
+
+        Dark themes: additive light, per-channel soft shoulder ``1 - exp(-g * e * colour)`` (hot cores go white).
+        Light themes: multiply layer ``1 - alpha * (1 - colour)`` with ``alpha = 1 - exp(-g * e)``."""
+        q = (np.arange(256, dtype=np.float64) / 255.0) ** 2 * self.TONE_AMAX            # (256,) energy
+        col = self.ramp.astype(np.float64)                                                # (512,3)
+        if self.glow_add:
+            out = 1.0 - np.exp(-self.TONE_GAIN_ADD * q[:, None, None] * col[None, :, :])
+        else:
+            alpha = 1.0 - np.exp(-self.TONE_GAIN_MUL * q)
+            out = 1.0 - alpha[:, None, None] * (1.0 - col[None, :, :])
+        return _pack(out).reshape(-1)
 
 
 # =================================================================================================== sprites
@@ -444,16 +519,28 @@ class _Proj:
 class _Scene:
     """One rendered scene (opaque layer + glow); composed with the background into ``final``."""
 
-    __slots__ = ("key", "Wr", "Hr", "k", "spr_img", "spr_arr", "glow_img", "glow_arr", "glow_f", "bloom_img",
-                 "final", "final_key", "interactive", "build_ms")
+    __slots__ = ("key", "Wr", "Hr", "k", "spr_img", "spr_arr", "glow", "final", "final_key", "interactive", "build_ms",
+                 "static", "static_key")
 
     def __init__(self) -> None:
-        self.glow_img = None
-        self.glow_arr = None
-        self.bloom_img = None
+        self.glow = None
         self.final = None
         self.final_key = None
         self.build_ms = 0.0
+        self.static = None               # final + box / gizmo / scale bar / HUD baked in (only at rest)
+        self.static_key = None
+
+
+class _Glow:
+    """Tone-mapped glow layers (grid resolution) drawn in front of / behind the sprites, plus bloom copies."""
+
+    __slots__ = ("f", "front", "behind", "comp_front", "comp_behind")
+
+    def __init__(self) -> None:
+        self.front = None
+        self.behind = None
+        self.comp_front = None           # full-resolution layers (main + bloom, focus sprites cut out)
+        self.comp_behind = None
 
 
 def _blur121(a: np.ndarray) -> np.ndarray:
@@ -504,8 +591,7 @@ class SceneView(QtWidgets.QWidget):
         self._sol_cls = np.zeros(0, np.uint8)
         self._sol_labels: Optional[List[str]] = None
         self._sol_orig: Optional[np.ndarray] = None
-        self._sol_sub: Optional[np.ndarray] = None
-        self._sol_sub_comp = 1.0
+        self._sol_rank = np.zeros(0, np.float32)
         self._n_sv = 0
         self._sv_o = np.zeros((0, 3), np.float32)
         self._sv_h = np.zeros((0, 2, 3), np.float32)
@@ -519,7 +605,7 @@ class SceneView(QtWidgets.QWidget):
         self._dn_val = np.zeros(0, np.float32)
         self._dn_emit = np.zeros(0, np.float32)
         self._dn_orig: Optional[np.ndarray] = None
-        self._dn_sub: Optional[np.ndarray] = None
+        self._dn_rank = np.zeros(0, np.float32)
         self._dn_h = 1.0
         self._dn_op_data = 0.85
         self._dn_vrange = (0.0, 1.0)
@@ -546,13 +632,18 @@ class SceneView(QtWidgets.QWidget):
         self._scene: Optional[_Scene] = None
         self._bg_cache: Dict[Tuple[int, int, int], QtGui.QImage] = {}
         self._theme_ver = 0
+        self._ovl_ver = 0                    # bumped when HUD text, options or theme change (invalidates baked overlays)
         self._interacting = False
-        self._rs = 1.0                       # adaptive interactive render scale
+        self._level = 0                      # adaptive interactive quality level (index into _LEVELS)
+        self._rs = 1.0                       # current interactive render scale
+        self._lod = 0                        # current interactive point-budget level
+        self._ema_ms = 0.0
+        self._viol = 0
+        self._adapt_pending = False
         self._fps = 0.0
         self._last_paint_ms = 0.0
         self._last_paint_t = 0.0
         self._dn_fade = 1.0                  # animated density opacity multiplier
-        self._dn_fade_target = 1.0
         self._pulse = 0.35
         self._pulse_last_update = 0.0
         self._hover: Optional[Dict[str, Any]] = None
@@ -564,14 +655,14 @@ class SceneView(QtWidgets.QWidget):
         # ---- interaction
         self._drag_mode: Optional[str] = None
         self._drag_last = QtCore.QPointF()
-        self._drag_start = QtCore.QPointF()
         self._drag_moved = 0.0
         self._press_t = 0.0
         self._ball_prev = np.array([0.0, 0.0, 1.0])
         self._vel_axis = np.array([0.0, 1.0, 0.0])
         self._vel = 0.0
         self._vel_t = 0.0
-        self._skip_click = False
+        self._inertia_last = 0.0
+        self._bounds_cache: Optional[Tuple[int, np.ndarray, float]] = None
 
         # ---- timers / animations
         self._settle_timer = QtCore.QTimer(self)
@@ -624,10 +715,15 @@ class SceneView(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------------------------------------- theme
     def set_theme(self, tokens: Dict[str, str]) -> None:
+        """Retheme from tokens (``#RRGGBB``): bg0, bg1, line, ink, ink2, ink3, solvent, solute, accent, ok, warn, err.
+
+        Missing / invalid keys fall back to the built-in dark navy palette.  The background is a vertical gradient
+        bg1 (top) -> bg0 (bottom) with a faint vignette; light backgrounds (by luminance) switch the density glow
+        from additive to multiply blending and darken the sphere shading accordingly."""
         self._theme = _Theme(dict(tokens or {}))
         self._theme_ver += 1
+        self._ovl_ver += 1
         self._bg_cache.clear()
-        self._rebuild_solute_classes()
         self._invalidate_data()
 
     def refresh_theme(self) -> None:
@@ -643,6 +739,9 @@ class SceneView(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------------------------------- solute data
     def set_solute(self, xyz, radii=None, roles=None, labels=None) -> None:
+        """Solute atoms: xyz (n,3) A; radii (n,) vdW-like (default 1.5); roles (n,) uint8: 0 ordinary, 1 zone anchor
+        (token ``solute`` coral, brighter, always drawn), 2 other (dim); labels (n,) for hover text.  Non-finite
+        atoms are dropped; ``hovered``/``clicked`` indices still refer to the caller's array."""
         a = self._as_points(xyz)
         n_in = a.shape[0]
         fin = np.isfinite(a).all(axis=1) if n_in else np.zeros(0, bool)
@@ -684,7 +783,7 @@ class SceneView(QtWidgets.QWidget):
         if n == 0:
             self._sol_cls = np.zeros(0, np.uint8)
             self._sol_rad_eff = np.zeros(0, np.float32)
-            self._sol_sub = None
+            self._sol_rank = np.zeros(0, np.float32)
             return
         rng = np.random.default_rng(11)
         var = rng.integers(0, 3, n).astype(np.uint8)
@@ -693,18 +792,31 @@ class SceneView(QtWidgets.QWidget):
         cls[self._sol_role >= 2] = C_DIM
         self._sol_cls = cls
         self._sol_rad_eff = (self._sol_rad * _SOLUTE_RADIUS_SCALE).astype(np.float32)
-        if n > _INTERACTIVE_SOLUTE:
-            rank = rng.random(n)
-            keep = rank < (_INTERACTIVE_SOLUTE / float(n))
-            keep |= (self._sol_role == 1)
-            self._sol_sub = np.flatnonzero(keep)
-            self._sol_sub_comp = float(min(1.35, (n / max(1.0, self._sol_sub.size)) ** (1.0 / 3.0)))
-        else:
-            self._sol_sub = None
-            self._sol_sub_comp = 1.0
+        rank = rng.random(n).astype(np.float32)
+        rank[self._sol_role == 1] = -1.0                      # anchors are always drawn
+        self._sol_rank = rank
+
+    def _solute_subset(self, lod: int):
+        """Indices of the solute atoms drawn while interacting (None = all) and the radius compensation."""
+        n = self._n_sol
+        cap = int(_INTERACTIVE_SOLUTE * _LOD_FRAC[lod])
+        if n <= cap:
+            return None, 1.0
+        sub = np.flatnonzero(self._sol_rank < (cap / float(n)))
+        return sub, float(min(1.45, (n / max(1.0, sub.size)) ** (1.0 / 3.0)))
+
+    def _density_subset(self, lod: int):
+        n = self._n_dn
+        cap = int(_INTERACTIVE_DENSITY * _LOD_FRAC[lod])
+        if n <= cap:
+            return None
+        return np.flatnonzero(self._dn_rank < (cap / float(n)))
 
     # ------------------------------------------------------------------------------------------ solvent data
     def set_solvent(self, oxygen_xyz, hydrogen_xyz=None, state=None, labels=None) -> None:
+        """Solvent molecules: oxygen_xyz (m,3), optional hydrogen_xyz (m,2,3), state (m,) uint8:
+        0 bulk (small, dim), 1 in zone (bright solvent colour + halo), 2 just entered (pale pulse ring),
+        3 just left (coral ghost ring).  The ring pulse runs while any state 2/3 exists (unless reduce_motion)."""
         o = self._as_points(oxygen_xyz)
         m_in = o.shape[0]
         fin = np.isfinite(o).all(axis=1) if m_in else np.zeros(0, bool)
@@ -745,6 +857,9 @@ class SceneView(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------------------------------ density data
     def set_density(self, xyz, values, vmin: float, vmax: float, opacity: float = 0.85) -> None:
+        """Weighted points (voxel centres) shown as a volumetric glow.  ``values`` are mapped through
+        [vmin, vmax] to the colour ramp deep blue -> aquamarine -> warm white (pale aqua -> teal -> indigo on light
+        themes).  Up to 80,000 points are kept; the cloud fades in over ~250 ms; identical re-sets are no-ops."""
         a = self._as_points(xyz)
         try:
             v = np.asarray(values, np.float64).reshape(-1)
@@ -772,39 +887,41 @@ class SceneView(QtWidgets.QWidget):
             vmin, vmax = 0.0, 1.0
         if not (np.isfinite(vmin) and np.isfinite(vmax)):
             vmin, vmax = (float(v.min()), float(v.max())) if v.size else (0.0, 1.0)
+        try:
+            op_new = float(min(max(opacity, 0.0), 1.0))
+        except Exception:
+            op_new = 0.85
+        if (self._n_dn == a.shape[0] and self._n_dn and (vmin, vmax) == self._dn_vrange and op_new == self._dn_op_data
+                and np.array_equal(self._dn_xyz, a.astype(np.float32)) and np.array_equal(self._dn_val, v.astype(np.float32))):
+            return                                                       # identical data: nothing to redraw or fade
         rng = vmax - vmin
         t = np.clip((v - vmin) / rng, 0.0, 1.0) if rng > 1e-12 else np.ones_like(v)
         self._n_dn = a.shape[0]
         self._dn_xyz = np.ascontiguousarray(a, np.float32)
         self._dn_val = v.astype(np.float32)
-        self._dn_t = t.astype(np.float32)
-        self._dn_emit = (0.10 + 0.90 * self._dn_t ** 1.15).astype(np.float32)
+        self._dn_t = (t ** 1.25).astype(np.float32)                    # colour position (compresses the hot end)
+        self._dn_emit = (0.06 + 0.94 * t ** 1.8).astype(np.float32)    # emission: peaks dominate, thresholds fade
         self._dn_orig = orig
         self._dn_vrange = (vmin, vmax)
         self._dn_h = _estimate_spacing(self._dn_xyz) if self._n_dn > 1 else 1.0
-        if self._n_dn > _INTERACTIVE_DENSITY:
-            keep = np.random.default_rng(5).random(self._n_dn) < (_INTERACTIVE_DENSITY / float(self._n_dn))
-            self._dn_sub = np.flatnonzero(keep)
-        else:
-            self._dn_sub = None
-        try:
-            self._dn_op_data = float(min(max(opacity, 0.0), 1.0))
-        except Exception:
-            self._dn_op_data = 0.85
+        self._dn_rank = np.random.default_rng(5).random(self._n_dn).astype(np.float32)
+        self._dn_op_data = op_new
         self._invalidate_data(bounds=True)
         self._start_density_fade(from_zero=True)
 
     def clear_density(self) -> None:
+        """Remove the density cloud."""
         self._n_dn = 0
         self._dn_xyz = np.zeros((0, 3), np.float32)
         self._dn_t = self._dn_val = self._dn_emit = np.zeros(0, np.float32)
         self._dn_orig = None
-        self._dn_sub = None
+        self._dn_rank = np.zeros(0, np.float32)
         self._fade_anim.stop()
         self._invalidate_data(bounds=True)
 
     # --------------------------------------------------------------------------------------------- the box
     def set_box(self, dims, origin=None) -> None:
+        """Periodic cell from MDAnalysis [a, b, c, alpha, beta, gamma] (A, degrees; triclinic ok) or None."""
         self._box_dims = None
         self._box_corners = None
         if dims is not None:
@@ -824,15 +941,20 @@ class SceneView(QtWidgets.QWidget):
                     self._box_corners = corners
             except Exception:
                 self._box_corners = None
-        self._invalidate_data(bounds=True, scene=False)
+        self._invalidate_data(bounds=True)
 
     def set_hud(self, lines: List[str]) -> None:
+        """Small monospace text block in the top-left corner (first line emphasised)."""
         self._hud = [str(s) for s in (lines or [])]
+        self._ovl_ver += 1
         self.update()
 
     def set_options(self, show_box: bool = True, show_axes: bool = True, solute_style: str = "spheres",
                     density_opacity: Optional[float] = None, reduce_motion: bool = False,
                     show_scale_bar: bool = True) -> None:
+        """Set all view options at once (omitted arguments take their defaults).  ``solute_style``: spheres |
+        points | ribbon-points; ``density_opacity`` None keeps the value given to ``set_density``;
+        ``reduce_motion`` jumps instead of animating and freezes the ring pulse."""
         style = str(solute_style).lower() if solute_style else "spheres"
         if style not in ("spheres", "points", "ribbon-points"):
             style = "spheres"
@@ -841,6 +963,7 @@ class SceneView(QtWidgets.QWidget):
         self._opts.update(show_box=bool(show_box), show_axes=bool(show_axes), solute_style=style,
                           reduce_motion=bool(reduce_motion), show_scale_bar=bool(show_scale_bar),
                           density_opacity=None if density_opacity is None else float(min(max(density_opacity, 0.0), 1.0)))
+        self._ovl_ver += 1
         if self._opts["reduce_motion"]:
             self._cam_anim.stop()
             self._fade_anim.stop()
@@ -848,7 +971,7 @@ class SceneView(QtWidgets.QWidget):
             self._inertia_timer.stop()
         self._update_pulse_running()
         if style_changed:
-            self._invalidate_data(scene=True)
+            self._invalidate_data()
         new_eff = self._dn_opacity()
         if self._n_dn and abs(new_eff - old_eff) > 1e-4 and not self._opts["reduce_motion"]:
             # cross-fade the glow from its old to its new strength
@@ -859,14 +982,17 @@ class SceneView(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------------------------------------ camera
     def reset_view(self, animate: bool = True) -> None:
-        tgt, dist, zoom = self._frame_params()
-        self._auto_frame = False
+        """Frame solute + solvent + density in the default isometric orientation, together with the cell unless the
+        cell is more than ~2.4x larger than the data (a huge periodic box would shrink the molecules to specks)."""
         q = _preset_quat("iso")
-        self._framed_center, self._framed_radius = self._scene_bounds()
+        tgt, dist, zoom = self._frame_params(q)
+        self._framed_center, self._framed_radius = self._bounds_of(self._framing_layers())
+        self._auto_frame = True            # keeps following the data until the user (or a camera call) moves the view
         self._cor = None
         self._goto(dict(q=q, zoom=zoom, target=tgt, dist=dist), animate)
 
     def set_view_preset(self, name: str, animate: bool = True) -> None:
+        """Look down an axis: "x" | "y" | "z" (z = standard top view: x right, y up) | "iso" (also "-x", "-y", "-z")."""
         q = _preset_quat(name)
         if q is None:
             return
@@ -876,6 +1002,7 @@ class SceneView(QtWidgets.QWidget):
         self._goto(cur, animate)
 
     def focus_on(self, xyz, animate: bool = True) -> None:
+        """Centre the view on the centroid of ``xyz``; the zoom is kept unless the points would leave the screen."""
         a = self._as_points(xyz)
         if a.shape[0]:
             a = a[np.isfinite(a).all(axis=1)]
@@ -891,6 +1018,7 @@ class SceneView(QtWidgets.QWidget):
         self._goto(cur, animate)
 
     def set_center_of_rotation(self, xyz) -> None:
+        """Rotate about the centroid of ``xyz`` (it stays fixed on screen); None = the screen centre."""
         if xyz is None:
             self._cor = None
             return
@@ -900,11 +1028,15 @@ class SceneView(QtWidgets.QWidget):
         self._cor = a.astype(np.float64).mean(axis=0) if a.shape[0] else None
 
     def camera_state(self) -> Dict[str, Any]:
+        """JSON-able view: quat [w,x,y,z] (world->view rotation), zoom (1/A: a point 1/zoom A from the centre lands
+        on the edge of the short viewport side, so it is resolution independent), center [x,y,z] (A), distance (A,
+        perspective), cor (centre of rotation or None)."""
         return {"quat": [float(x) for x in self._q], "zoom": float(self._zoom),
                 "center": [float(x) for x in self._target], "distance": float(self._dist),
                 "cor": None if self._cor is None else [float(x) for x in self._cor]}
 
     def set_camera_state(self, state: Dict[str, Any], animate: bool = False) -> None:
+        """Restore a state from ``camera_state()`` (missing / invalid fields keep their current value)."""
         if not isinstance(state, dict):
             return
         cur = self._cam_dict()
@@ -958,7 +1090,11 @@ class SceneView(QtWidgets.QWidget):
 
     def pick(self, x: float, y: float) -> Dict[str, Any]:
         """Hover/click picking at widget position (x, y): payload dict or {}."""
-        return self._pick(float(x), float(y))
+        return self._public(self._pick(float(x), float(y)))
+
+    @staticmethod
+    def _public(hit: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: v for k, v in hit.items() if not k.startswith("_")}
 
     def set_pulse_phase(self, phase: float) -> None:
         try:
@@ -968,6 +1104,7 @@ class SceneView(QtWidgets.QWidget):
         self.update()
 
     def stats(self) -> Dict[str, Any]:
+        """fps (EMA of recent paints), point counts (finite points only) and the last paint time in ms."""
         return {"fps": float(self._fps), "n_solute": int(self._n_sol), "n_solvent": int(self._n_sv),
                 "n_density": int(self._n_dn), "last_paint_ms": float(self._last_paint_ms)}
 
@@ -1004,9 +1141,12 @@ class SceneView(QtWidgets.QWidget):
         self.set_solvent(None)
         self.clear_density()
         self.set_box(None)
+        self._auto_frame = True
+        self._framed_radius = 0.0
 
     # ------------------------------------------------------------------------------------------ export
     def render_to_image(self, width: int, height: int) -> QtGui.QImage:
+        """Offscreen full-quality render (1.5x supersampled, without hover) of the current view at width x height."""
         w = max(1, int(width))
         h = max(1, int(height))
         ss = 1.5
@@ -1015,7 +1155,8 @@ class SceneView(QtWidgets.QWidget):
         final = self._compose(sc, self._dn_opacity())
         p = QtGui.QPainter(final)
         p.scale(sc.Wr / float(w), sc.Hr / float(h))
-        self._paint_overlays(p, w, h, proj, export=True)
+        self._paint_static(p, w, h, proj)
+        self._paint_dynamic(p, w, h, proj, export=True)
         p.end()
         out = final.scaled(w, h, _Qt.AspectRatioMode.IgnoreAspectRatio, _Qt.TransformationMode.SmoothTransformation)
         return out.convertToFormat(QtGui.QImage.Format.Format_RGB32)
@@ -1051,7 +1192,7 @@ class SceneView(QtWidgets.QWidget):
     def _scale_log(self, W: int, H: int) -> float:
         return self._zoom * 0.5 * float(min(W, H))
 
-    def _invalidate_data(self, bounds: bool = False, scene: bool = True) -> None:
+    def _invalidate_data(self, bounds: bool = False) -> None:
         self._data_ver += 1
         self._proj = None
         if bounds:
@@ -1064,42 +1205,78 @@ class SceneView(QtWidgets.QWidget):
             self._hover_timer.start(40)
 
     # ---- scene bounds / framing
-    def _scene_bounds(self) -> Tuple[np.ndarray, float]:
-        mins, maxs = [], []
-        layers = []
+    def _layers(self, with_box: bool = True) -> List[np.ndarray]:
+        layers: List[np.ndarray] = []
         if self._n_sol:
             layers.append(self._sol_xyz)
         if self._n_sv:
             layers.append(self._sv_o)
         if self._n_dn:
             layers.append(self._dn_xyz)
-        if self._box_corners is not None:
+        if with_box and self._box_corners is not None:
             layers.append(self._box_corners.astype(np.float32))
+        return layers
+
+    @staticmethod
+    def _bounds_of(layers: List[np.ndarray]) -> Tuple[np.ndarray, float]:
         if not layers:
             return np.zeros(3), 10.0
-        for a in layers:
-            mins.append(a.min(axis=0))
-            maxs.append(a.max(axis=0))
-        lo = np.min(np.array(mins, np.float64), axis=0)
-        hi = np.max(np.array(maxs, np.float64), axis=0)
+        lo = np.min(np.array([a.min(axis=0) for a in layers], np.float64), axis=0)
+        hi = np.max(np.array([a.max(axis=0) for a in layers], np.float64), axis=0)
         c = (lo + hi) * 0.5
         r = 0.0
         for a in layers:
             r = max(r, float(np.sqrt(((a - c.astype(np.float32)) ** 2).sum(axis=1).max())))
         return c, max(r, 4.0)
 
-    def _frame_params(self) -> Tuple[np.ndarray, float, float]:
-        c, r = self._scene_bounds()
+    def _scene_bounds(self) -> Tuple[np.ndarray, float]:
+        """Centre and radius of everything drawn (solute, solvent, density, box)."""
+        return self._bounds_of(self._layers(True))
+
+    def _framing_layers(self) -> List[np.ndarray]:
+        """What a reset frames: all data, plus the cell unless it dwarfs the data (> 2.4x): a huge periodic box
+        around a small region of interest would shrink the molecules to specks."""
+        data = self._layers(False)
+        box = self._box_corners
+        if box is None:
+            return data
+        if not data:
+            return [box.astype(np.float32)]
+        d_ext = max(float(np.ptp(np.concatenate(data, axis=0), axis=0).max()), 1e-6)
+        b_ext = float(np.ptp(box, axis=0).max())
+        return data + [box.astype(np.float32)] if b_ext <= 2.4 * d_ext else data
+
+    def _frame_params(self, q: Optional[np.ndarray] = None) -> Tuple[np.ndarray, float, float]:
+        """Target, camera distance and zoom that frame the data in orientation ``q`` (default: the current one)."""
+        layers = self._framing_layers()
+        c, r = self._bounds_of(layers)
         dist = max(5.0 * r, 14.0)
-        zoom = 0.90 * math.sqrt(max(dist * dist - r * r, 1e-9)) / (r * dist)
+        Rm = self._Rm if q is None else _qmat(_qnorm(q))
+        ux = uy = 0.0
+        for a in layers:
+            if a.shape[0] > 40000:
+                a = a[:: int(math.ceil(a.shape[0] / 40000.0))]
+            v = (np.asarray(a, np.float64) - c) @ Rm.T
+            u = dist / np.maximum(dist - v[:, 2], 1e-6)                      # perspective factor at the focal plane
+            ux = max(ux, float(np.abs(v[:, 0] * u).max()))
+            uy = max(uy, float(np.abs(v[:, 1] * u).max()))
+        W, H = self.width(), self.height()
+        if W < 80 or H < 80:
+            W, H = 900, 600
+        m = 0.88                                                                # share of the half viewport to fill
+        if layers and (ux > 1e-6 or uy > 1e-6):
+            scale = min(0.5 * W * m / max(ux, 1e-6), 0.5 * H * m / max(uy, 1e-6))
+        else:
+            scale = 0.5 * min(W, H) * m / max(r, 1e-6)
+        zoom = 2.0 * scale / float(min(W, H))
         return c, dist, zoom
 
     def _maybe_auto_frame(self) -> None:
         if not self._auto_frame:
             return
-        c, r = self._scene_bounds()
         if (self._n_sol + self._n_sv + self._n_dn) == 0 and self._box_corners is None:
             return
+        c, r = self._bounds_of(self._framing_layers())
         first = self._framed_radius <= 0.0
         moved = np.linalg.norm(c - self._framed_center) > 0.3 * max(r, self._framed_radius)
         grew = abs(r - self._framed_radius) > 0.3 * max(r, self._framed_radius, 1e-6)
@@ -1137,8 +1314,8 @@ class SceneView(QtWidgets.QWidget):
             self._cam_anim.start()
         else:
             self._set_cam(cam["q"], cam["zoom"], cam["target"], cam["dist"])
-            self._settle_soon()
 
+    @_guarded
     def _on_cam_anim(self, v) -> None:
         a, b = self._cam_from, self._cam_to
         if a is None or b is None:
@@ -1151,12 +1328,14 @@ class SceneView(QtWidgets.QWidget):
         self._set_cam(q, zoom, tgt, dist)
         self._settle_soon()
 
+    @_guarded
     def _on_cam_anim_done(self) -> None:
         b = self._cam_to
         if b is not None:
             self._set_cam(b["q"], b["zoom"], b["target"], b["dist"])
         self._settle_soon()
 
+    @_guarded
     def _emit_camera(self) -> None:
         self._last_cam_emit = time.perf_counter()
         self.cameraChanged.emit()
@@ -1170,7 +1349,6 @@ class SceneView(QtWidgets.QWidget):
 
     # ---- interaction state
     def _begin_interaction(self, hold: bool = True) -> None:
-        self._interacting = True
         self._settle_timer.stop()
         if hold:
             self._cam_anim.stop()
@@ -1179,6 +1357,7 @@ class SceneView(QtWidgets.QWidget):
         self._interacting = True
         self._settle_timer.start(_SETTLE_MS)
 
+    @_guarded
     def _settle(self) -> None:
         if self.is_animating() or self._inertia_timer.isActive() or self._drag_mode is not None:
             self._settle_timer.start(_SETTLE_MS)
@@ -1226,19 +1405,24 @@ class SceneView(QtWidgets.QWidget):
         self._set_cam(self._q, z1, self._target + delta, self._dist)
 
     # =============================================================================================== events
+    @_guarded
     def resizeEvent(self, ev) -> None:  # noqa: N802
         self._proj = None
         self._scene = None
         super().resizeEvent(ev)
 
+    @_guarded
     def showEvent(self, ev) -> None:  # noqa: N802
         super().showEvent(ev)
         self._update_pulse_running()
 
+    @_guarded
     def hideEvent(self, ev) -> None:  # noqa: N802
         super().hideEvent(ev)
-        self._pulse_anim.pause() if self._pulse_anim.state() == QtCore.QAbstractAnimation.State.Running else None
+        if self._pulse_anim.state() == QtCore.QAbstractAnimation.State.Running:
+            self._pulse_anim.pause()
 
+    @_guarded
     def leaveEvent(self, ev) -> None:  # noqa: N802
         self._mouse_pos = None
         if self._hover is not None or self._hover_key is not None:
@@ -1248,6 +1432,7 @@ class SceneView(QtWidgets.QWidget):
             self.update()
         super().leaveEvent(ev)
 
+    @_guarded
     def mousePressEvent(self, ev: QtGui.QMouseEvent) -> None:  # noqa: N802
         self.setFocus(_Qt.FocusReason.MouseFocusReason)
         pos = ev.position()
@@ -1257,7 +1442,6 @@ class SceneView(QtWidgets.QWidget):
             shift = bool(ev.modifiers() & _Qt.KeyboardModifier.ShiftModifier)
             self._drag_mode = "pan" if (btn == _Qt.MouseButton.MiddleButton or shift) else "rot"
             self._drag_last = pos
-            self._drag_start = pos
             self._drag_moved = 0.0
             self._press_t = time.perf_counter()
             self._ball_prev = self._arcball(pos.x(), pos.y())
@@ -1270,6 +1454,7 @@ class SceneView(QtWidgets.QWidget):
         else:
             super().mousePressEvent(ev)
 
+    @_guarded
     def mouseMoveEvent(self, ev: QtGui.QMouseEvent) -> None:  # noqa: N802
         pos = ev.position()
         self._mouse_pos = pos
@@ -1293,7 +1478,7 @@ class SceneView(QtWidgets.QWidget):
                 axis = axis / sn
                 self._rotate_view(_qaxis(axis, ang))
                 dt = max(now - self._vel_t, 1e-3) if self._vel_t else 0.016
-                inst = ang / min(dt, 0.1)
+                inst = ang / min(max(dt, 0.004), 0.1)
                 self._vel = 0.6 * self._vel + 0.4 * inst if self._vel else inst
                 self._vel_axis = axis
             self._vel_t = now
@@ -1302,6 +1487,7 @@ class SceneView(QtWidgets.QWidget):
         self._settle_soon()
         ev.accept()
 
+    @_guarded
     def mouseReleaseEvent(self, ev: QtGui.QMouseEvent) -> None:  # noqa: N802
         mode = self._drag_mode
         if mode is None:
@@ -1312,25 +1498,26 @@ class SceneView(QtWidgets.QWidget):
         pos = ev.position()
         click = (ev.button() == _Qt.MouseButton.LeftButton and self._drag_moved < 4.0
                  and (time.perf_counter() - self._press_t) < 0.6)
-        if click and not self._skip_click:
-            self.clicked.emit(self._pick(pos.x(), pos.y()))
-        self._skip_click = False
+        if click:
+            self.clicked.emit(self._public(self._pick(pos.x(), pos.y())))
         if (mode == "rot" and not click and not self._opts["reduce_motion"]
                 and (time.perf_counter() - self._vel_t) < 0.06 and self._vel > 0.8):
-            self._vel = min(self._vel, 9.0)
+            self._vel = min(self._vel, 6.0)
             self._inertia_last = time.perf_counter()
             self._inertia_timer.start()
         self._vel_t = 0.0
-        self._settle_soon()
+        if self._interacting or self._drag_moved > 0.0 or self._inertia_timer.isActive():
+            self._settle_soon()                                     # a plain click leaves the picture untouched
         self._request_pick()
         ev.accept()
 
+    @_guarded
     def mouseDoubleClickEvent(self, ev: QtGui.QMouseEvent) -> None:  # noqa: N802
-        self._skip_click = True
         self._inertia_timer.stop()
         self.reset_view(animate=True)
         ev.accept()
 
+    @_guarded
     def wheelEvent(self, ev: QtGui.QWheelEvent) -> None:  # noqa: N802
         dy = ev.angleDelta().y()
         if dy == 0:
@@ -1344,6 +1531,7 @@ class SceneView(QtWidgets.QWidget):
         self._settle_soon()
         ev.accept()
 
+    @_guarded
     def keyPressEvent(self, ev: QtGui.QKeyEvent) -> None:  # noqa: N802
         k = ev.key()
         mods = ev.modifiers()
@@ -1384,11 +1572,12 @@ class SceneView(QtWidgets.QWidget):
             return
         ev.accept()
 
+    @_guarded
     def _inertia_tick(self) -> None:
         now = time.perf_counter()
-        dt = min(now - getattr(self, "_inertia_last", now), 0.05)
+        dt = min(now - (self._inertia_last or now), 0.05)
         self._inertia_last = now
-        self._vel *= math.exp(-dt / 0.28)
+        self._vel *= math.exp(-dt / 0.22)
         if self._vel < 0.12:
             self._inertia_timer.stop()
             self._vel = 0.0
@@ -1410,27 +1599,35 @@ class SceneView(QtWidgets.QWidget):
         self._dn_fade = start
         self._fade_anim.start()
 
+    @_guarded
     def _on_fade_anim(self, v) -> None:
         self._dn_fade = float(v)
         self.update()
 
     def _update_pulse_running(self) -> None:
-        need = (not self._opts["reduce_motion"]) and bool(((self._sv_state == 2) | (self._sv_state == 3)).any()) \
-            if self._n_sv else False
-        running = self._pulse_anim.state() == QtCore.QAbstractAnimation.State.Running
-        if need and self.isVisible():
-            if not running:
+        """Run the ring pulse only while molecules in state 2/3 exist and motion is allowed."""
+        need = False
+        if self._n_sv and not self._opts["reduce_motion"]:
+            need = bool(((self._sv_state == 2) | (self._sv_state == 3)).any())
+        State = QtCore.QAbstractAnimation.State
+        st = self._pulse_anim.state()
+        if need:
+            if st == State.Stopped:
                 self._pulse_anim.start()
-        elif running:
+            elif st == State.Paused and self.isVisible():
+                self._pulse_anim.resume()
+        elif st != State.Stopped:
             self._pulse_anim.stop()
-        elif need and not self.isVisible() and self._pulse_anim.state() == QtCore.QAbstractAnimation.State.Paused:
-            pass
         if self._opts["reduce_motion"]:
             self._pulse = 0.35
 
+    def pulse_running(self) -> bool:
+        return self._pulse_anim.state() == QtCore.QAbstractAnimation.State.Running
+
+    @_guarded
     def _on_pulse_anim(self, v) -> None:
         now = time.perf_counter()
-        if now - self._pulse_last_update < 0.027:        # ~35 Hz is plenty for a ring
+        if now - self._pulse_last_update < 0.030:        # ~30 Hz is plenty for a ring
             return
         self._pulse_last_update = now
         self._pulse = float(v)
@@ -1476,7 +1673,7 @@ class SceneView(QtWidgets.QWidget):
 
     def _scene_bounds_cached(self) -> Tuple[np.ndarray, float]:
         key = self._data_ver
-        cached = getattr(self, "_bounds_cache", None)
+        cached = self._bounds_cache
         if cached is not None and cached[0] == key:
             return cached[1], cached[2]
         c, r = self._scene_bounds()
@@ -1514,7 +1711,7 @@ class SceneView(QtWidgets.QWidget):
         else:
             edge = th.c["line"].astype(np.float32)
             rgb = grad * (1.0 - 0.10 * v)[..., None] + edge[None, None, :] * (0.10 * v)[..., None] * 0.35
-        rgb = rgb + (_DITHER_TILE(Hr, Wr) - 0.5) / 255.0
+        rgb = rgb + (_dither_tile(Hr, Wr) - 0.5) / 255.0
         arr = _pack(rgb)
         img = QtGui.QImage(arr.data, Wr, Hr, Wr * 4, QtGui.QImage.Format.Format_RGB32).copy()
         if len(self._bg_cache) > 6:
@@ -1530,7 +1727,7 @@ class SceneView(QtWidgets.QWidget):
         out_cx, out_cy, out_R, out_w = [], [], [], []
         style = self._opts["solute_style"]
 
-        def finish(sx, sy, d, rpx, cls, fogscale, rmin, rmax, extra_valid=None):
+        def finish(sx, sy, d, rpx, cls, fogscale, rmin, rmax, extra_valid=None, fog_gamma=1.0):
             cxf = sx * k
             cyf = sy * k
             valid = (d > proj.near) & np.isfinite(cxf) & np.isfinite(cyf)
@@ -1544,7 +1741,7 @@ class SceneView(QtWidgets.QWidget):
             if cxf.size == 0:
                 return
             ft = np.clip((d - dlo) * inv, 0.0, 1.0)
-            lvl = (ft * fogscale * (_FOG - 1) + 0.5).astype(np.int32)
+            lvl = ((ft if fog_gamma == 1.0 else ft ** fog_gamma) * fogscale * (_FOG - 1) + 0.5).astype(np.int32)
             row = cls.astype(np.int32) * _FOG + lvl
             dq = (ft * _DQ_SPAN + 100.0).astype(np.uint32)
             out_cx.append(np.rint(cxf).astype(np.int64))
@@ -1557,20 +1754,21 @@ class SceneView(QtWidgets.QWidget):
             sx, sy, d, ps = proj.sol
             rad = self._sol_rad_eff
             cls = self._sol_cls
-            fogs = np.where(self._sol_role == 1, 0.45, 1.0).astype(np.float32)
+            role = self._sol_role
+            fogs = np.where(role == 1, 0.45, 1.0).astype(np.float32)
             comp = 1.0
-            if interactive and self._sol_sub is not None:
-                sub = self._sol_sub
-                sx, sy, d, ps, rad, cls, fogs = sx[sub], sy[sub], d[sub], ps[sub], rad[sub], cls[sub], fogs[sub]
-                comp = self._sol_sub_comp
+            if interactive:
+                sub, comp = self._solute_subset(self._lod)
+                if sub is not None:
+                    sx, sy, d, ps, rad, cls, fogs, role = (a[sub] for a in (sx, sy, d, ps, rad, cls, fogs, role))
             ft = np.clip((d - dlo) * inv, 0.0, 1.0)
             shrink = 1.0 - 0.07 * ft
             rpx = rad * ps * (k * comp) * shrink
             if style == "spheres":
                 finish(sx, sy, d, rpx, cls, fogs, 1, _MAXR)
-            else:
-                fs = fogs * (1.35 if style == "ribbon-points" else 1.0)
-                finish(sx, sy, d, rpx * 0.34, cls, np.minimum(fs, 1.0), 0, 2)
+            else:                                                  # points: small legible dots, anchors a bit bigger
+                rp = rpx * 0.20 + np.where(role == 1, 0.9 * k, 0.0)
+                finish(sx, sy, d, rp, cls, fogs * 0.75, 1, 4, fog_gamma=0.55 if style == "ribbon-points" else 1.0)
 
         # ---- solvent
         if self._n_sv and proj.svo is not None:
@@ -1580,14 +1778,14 @@ class SceneView(QtWidgets.QWidget):
             drawn = st != 3
             fs = np.where(st == 0, 1.0, 0.5).astype(np.float32)
             rmin = np.where(st == 0, 0, 1)
-            finish(sx, sy, d, rpx, _CLS_O[st], fs, 0, _MAXR, extra_valid=drawn)
+            finish(sx, sy, d, rpx, _CLS_O[st], fs, rmin, _MAXR, extra_valid=drawn)
             if self._sv_hvalid.any() and proj.svh is not None:
                 st2 = np.repeat(st, 2)
                 hv = np.repeat(self._sv_hvalid, 2) & (st2 != 3)
                 sxh, syh, dh, psh = proj.svh
                 rph = _RH[st2] * psh * k
                 # bulk hydrogens are skipped when they would be sub-pixel specks
-                hv &= ~((st2 == 0) & (rph < 1.0))
+                hv &= ~((st2 == 0) & (rph < 2.6))
                 if hv.any():
                     fs2 = np.where(st2 == 0, 1.0, 0.5).astype(np.float32)
                     finish(sxh, syh, dh, rph, _CLS_H[st2], fs2, 0, _MAXR, extra_valid=hv)
@@ -1601,8 +1799,9 @@ class SceneView(QtWidgets.QWidget):
 
     # ---- the z-buffer splat ----------------------------------------------------------------------------
     def _splat(self, cx, cy, R, w0, Wr: int, Hr: int) -> np.ndarray:
-        npx = Wr * Hr
-        buf = np.full(npx, _EMPTY, np.uint32)
+        """Packed z/colour buffer with a 1 px guard border: shape (Hr+2)*(Wr+2), stride Wr+2."""
+        Wp = Wr + 2
+        buf = np.full((Hr + 2) * Wp, _EMPTY, np.uint32)
         n = cx.size
         if n == 0:
             return buf
@@ -1610,17 +1809,18 @@ class SceneView(QtWidgets.QWidget):
         cx, cy, R, w0 = cx[order], cy[order], R[order], w0[order]
         bank = self._bank
         pos = 0
-        stage = _STAGE0
+        # first stage: roughly enough of the nearest sprites to cover the image once (big sprites -> few)
+        k0 = float(np.mean((R[:256].astype(np.float32) + 0.5) ** 2)) * math.pi
+        stage = int(min(max(Wr * Hr / max(k0, 1.0), 24), _STAGE0))
         while pos < n:
             end = min(n, pos + stage)
             scx, scy, sR, sw = cx[pos:end], cy[pos:end], R[pos:end], w0[pos:end]
             if pos > 0:
                 scx, scy, sR, sw = self._cull(buf, scx, scy, sR, sw, Wr, Hr)
-            m = scx.size
-            if m:
+            if scx.size:
                 R8 = sR.astype(np.uint8)
                 o2 = np.argsort(R8, kind="stable")
-                scx, scy, sR, sw, R8 = scx[o2], scy[o2], sR[o2], sw[o2], R8[o2]
+                scx, scy, sw, R8 = scx[o2], scy[o2], sw[o2], R8[o2]
                 bc = np.bincount(R8)
                 starts = np.cumsum(bc) - bc
                 for rv in np.flatnonzero(bc):
@@ -1632,22 +1832,26 @@ class SceneView(QtWidgets.QWidget):
 
     @staticmethod
     def _cull(buf, scx, scy, sR, sw, Wr: int, Hr: int):
-        """Drop sprites whose centre and four inner points all lie behind already drawn nearer pixels."""
+        """Drop sprites that are hidden at all of ``_CULL_PATTERN`` (centre + 16 points inside the disc).
+
+        A sprite is only removed when every sample point already shows a nearer pixel, so what is lost can only be
+        slivers seen through gaps (measured: ~0.1-0.4 % of the covered pixels in dense scenes)."""
         big = sR >= 3
         if not big.any():
             return scx, scy, sR, sw
-        h = (sR * 0.55).astype(np.int64)
-        ok = big & (scx >= h) & (scx < Wr - h) & (scy >= h) & (scy < Hr - h)
+        Wp = Wr + 2
+        hm = (sR * _CULL_REACH).astype(np.int64)
+        ok = big & (scx >= hm) & (scx < Wr - hm) & (scy >= hm) & (scy < Hr - hm)
         if not ok.any():
             return scx, scy, sR, sw
         thr = (sw >> np.uint32(16)) << np.uint32(16)
         npx = buf.size
-        lin = np.clip(scy * Wr + scx, 0, npx - 1)
+        lin = np.clip((scy + 1) * Wp + scx + 1, 0, npx - 1)
         hid = buf[lin] < thr
-        hid &= buf[np.clip(lin + h, 0, npx - 1)] < thr
-        hid &= buf[np.clip(lin - h, 0, npx - 1)] < thr
-        hid &= buf[np.clip(lin + h * Wr, 0, npx - 1)] < thr
-        hid &= buf[np.clip(lin - h * Wr, 0, npx - 1)] < thr
+        rf = sR.astype(np.float32)
+        for fx, fy in _CULL_PATTERN:
+            off = (rf * fy).astype(np.int64) * Wp + (rf * fx).astype(np.int64)
+            hid &= buf[np.clip(lin + off, 0, npx - 1)] < thr
         hid &= ok
         if not hid.any():
             return scx, scy, sR, sw
@@ -1656,6 +1860,8 @@ class SceneView(QtWidgets.QWidget):
 
     @staticmethod
     def _draw_group(buf, Rv: int, gcx, gcy, gw, Wr: int, Hr: int, bank: _SpriteBank) -> None:
+        """Draw same-radius sprites (given far -> near) with an exact depth test."""
+        Wp = Wr + 2
         dy, dx, tidx = bank.sprite(Rv)
         K = dy.size
         ch = max(1, _CHUNK // K)
@@ -1668,8 +1874,8 @@ class SceneView(QtWidgets.QWidget):
             nb = ~inside
             brd = (gcx[nb], gcy[nb], gw[nb])
         if ins_cx.size:
-            off = bank.offsets(Rv, Wr)
-            base = ins_cy * Wr + ins_cx
+            off = bank.offsets(Rv, Wp)
+            base = (ins_cy + 1) * Wp + ins_cx + 1
             for c0 in range(0, base.size, ch):
                 idx = base[c0:c0 + ch, None] + off
                 pk = ins_w[c0:c0 + ch, None] + tidx
@@ -1689,69 +1895,133 @@ class SceneView(QtWidgets.QWidget):
                 ok = (xs >= 0) & (xs < Wr) & (ys >= 0) & (ys < Hr)
                 if not ok.any():
                     continue
-                idx = (ys * Wr + xs)[ok]
-                pk = (bw[c0:c0 + ch, None] + tidx)[ok] if tidx.ndim == 1 else None
+                idx = ((ys + 1) * Wp + xs + 1)[ok]
+                pk = (bw[c0:c0 + ch, None] + tidx)[ok]
                 msk = pk < buf[idx]
                 if msk.any():
                     _scatter(buf, idx[msk], pk[msk])
 
     # ---- resolve + anti-alias ----------------------------------------------------------------------------
-    def _resolve(self, buf: np.ndarray, Wr: int, Hr: int, aa: bool) -> np.ndarray:
+    def _resolve(self, buf: np.ndarray, Wr: int, Hr: int, aa: bool):
+        """Premultiplied ARGB for the covered pixels (padded layout, stride Wr+2); empty pixels stay 0."""
         lut = self._theme.lut
-        rgb = lut.take(buf & np.uint32(0xFFFF))
-        if aa:
-            _aa_edges(buf, rgb, Wr, Hr)
-        return rgb
+        rgb = np.zeros(buf.size, np.uint32)
+        ci = np.flatnonzero(buf != _EMPTY)
+        if ci.size:
+            rgb[ci] = lut.take(buf[ci] & np.uint32(0xFFFF))
+            if aa:
+                _aa_sprite_edges(buf, rgb, Wr)
+                _aa_edges(buf, rgb, Wr, Hr)
+        return rgb, ci
+
+    @staticmethod
+    def _focus_pixels(buf: np.ndarray, ci: np.ndarray) -> Optional[np.ndarray]:
+        """Flat (padded) indices of pixels whose top sprite is a 'focus' object: anchors, zone / entered waters."""
+        if ci.size == 0:
+            return None
+        rows = np.zeros(256, bool)
+        for c in (C_ANCHOR, C_ZONE_O, C_ZONE_H, C_ENTER_O, C_ENTER_H):
+            rows[c * _FOG:(c + 1) * _FOG] = True
+        fm = rows[(buf[ci] >> np.uint32(8)) & np.uint32(0xFF)]
+        return ci[fm] if fm.any() else None
+
+    def _focus_mask(self, buf: np.ndarray, fi: Optional[np.ndarray], Wr: int, Hr: int) -> Optional[QtGui.QImage]:
+        """Opaque-alpha image over the focus pixels (used to cut them out of the glow in front of the spheres)."""
+        if fi is None:
+            return None
+        m = np.zeros(buf.size, np.uint32)
+        m[fi] = np.uint32(0xFF000000)
+        self._mask_keep = m                                       # keep the array alive for the QImage
+        Wp = Wr + 2
+        return QtGui.QImage(m[Wp + 1:].data, Wr, Hr, Wp * 4, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+
+    def _combine_glow(self, main, bloom, f: int, Wr: int, Hr: int, mask) -> QtGui.QImage:
+        """Scale the grid image to full resolution, add the bloom, cut out the focus sprites."""
+        add = self._theme.glow_add
+        img = QtGui.QImage(Wr, Hr, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        p = QtGui.QPainter(img)
+        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
+        rect = QtCore.QRectF(0.0, 0.0, main.width() * f, main.height() * f)
+        p.drawImage(rect, main)
+        if bloom is not None:
+            p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_Plus if add
+                                 else QtGui.QPainter.CompositionMode.CompositionMode_Multiply)
+            p.setOpacity(_BLOOM_ADD if add else _BLOOM_MUL)
+            p.drawImage(rect, bloom)
+        if mask is not None:
+            p.setOpacity(1.0)
+            p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_DestinationOut)
+            p.drawImage(0, 0, mask)
+        p.end()
+        return img
 
     # ---- the density glow --------------------------------------------------------------------------------
-    def _build_glow(self, proj: _Proj, k: float, Wr: int, Hr: int, buf: np.ndarray, interactive: bool):
+    def _build_glow(self, proj: _Proj, k: float, Wr: int, Hr: int, buf: np.ndarray, interactive: bool,
+                    focus_idx: Optional[np.ndarray] = None):
+        """Density cloud + zone/anchor halos -> soft light layers (in front of / behind the opaque spheres).
+
+        Every source is a Gaussian blob of world size ``sigma``; blobs are accumulated at a coarse grid (bilinear
+        splat), blurred, tone mapped and drawn by Qt with additive (dark) or multiply (light) blending."""
         th = self._theme
         dlo, dhi = proj.dwin
-        inv = 1.0 / max(dhi - dlo, 1e-6)
+        span = max(dhi - dlo, 1e-6)
+        inv = 1.0 / span
+        ps_t = proj.scale * k                                    # raster px per Angstrom at the target plane
+        sig_d = _GLOW_SIGMA_REL * self._dn_h                      # world sigma of a density blob
+        f_min = (4.0 if interactive else 3.0) * k
+        f = int(min(max(round(sig_d * ps_t * 0.85), round(f_min), 2), 12))
+        cell = float(f * f)
         xs, ys, ws, ts, dqs = [], [], [], [], []
-        ps_t = proj.scale * k                                   # px per Angstrom at the target plane (raster)
-        sigma = max(1.7 * (k if k > 1 else 1.0), 0.62 * self._dn_h * ps_t)
-        if interactive:
-            sigma = max(sigma, 3.0)
-        f = int(min(max(round(sigma * 0.85), 2), 10))
-        if interactive:
-            f = max(f, 3)
-        have = False
+
+        def add(sx, sy, d, amp, tval, sigma_world, kappa=0.0, d0=0.0, dspan=1.0, boost=1.0):
+            valid = (d > proj.near) & np.isfinite(sx) & np.isfinite(sy)
+            fcl = np.clip((d - d0) / dspan, 0.0, 1.0)
+            sp = max(sigma_world * ps_t, 0.7)
+            wt = amp * np.exp(-kappa * fcl) * np.float32(boost * 2.0 * math.pi * sp * sp / cell)
+            if np.ndim(tval) == 0:
+                tv = np.full(sx.shape, tval, np.float32)
+            else:
+                tv = tval
+            if not valid.all():
+                sx, sy, wt, tv, d = sx[valid], sy[valid], wt[valid], tv[valid], d[valid]
+            if sx.size == 0:
+                return
+            xs.append(sx * k)
+            ys.append(sy * k)
+            ws.append(wt.astype(np.float32))
+            ts.append(tv.astype(np.float32))
+            dqs.append(np.clip((d - dlo) * inv, 0.0, 1.0) * _DQ_SPAN + 100.0)
+
         if self._n_dn and proj.dn is not None:
             sx, sy, d, ps = proj.dn
-            emit = self._dn_emit
-            tv = self._dn_t
-            if interactive and self._dn_sub is not None:
-                sub = self._dn_sub
+            emit, tv = self._dn_emit, self._dn_t
+            boost = _GLOW_GAIN_DENSITY
+            sub = self._density_subset(self._lod) if interactive else None
+            if sub is not None:
                 sx, sy, d, emit, tv = sx[sub], sy[sub], d[sub], emit[sub], tv[sub]
-            valid = (d > proj.near) & np.isfinite(sx) & np.isfinite(sy)
-            ft = np.clip((d - dlo) * inv, 0.0, 1.0)
-            w = emit * np.exp(-1.15 * ft)
-            if interactive and self._dn_sub is not None:
-                w = w * np.float32(self._n_dn / float(self._dn_sub.size))
-            if not valid.all():
-                sx, sy, w, tv, ft = sx[valid], sy[valid], w[valid], tv[valid], ft[valid]
-            if sx.size:
-                xs.append(sx * k); ys.append(sy * k); ws.append(w * self._glow_gain(f, k, proj)); ts.append(tv)
-                dqs.append((ft * _DQ_SPAN + 100.0))
-                have = True
-        # zone / entered halos
+                boost *= self._n_dn / float(max(sub.size, 1))
+            dd = d[d > proj.near]
+            if dd.size:
+                d0 = float(dd.min())
+                dsp = max(float(dd.max()) - d0, 1e-3)
+                add(sx, sy, d, emit, tv, sig_d, _GLOW_DEPTH_K, d0, dsp, boost)
         if self._n_sv and proj.svo is not None:
             st = self._sv_state
             hm = (st == 1) | (st == 2)
             if hm.any():
                 sx, sy, d, ps = (a[hm] for a in proj.svo)
-                valid = (d > proj.near) & np.isfinite(sx) & np.isfinite(sy)
-                ft = np.clip((d - dlo) * inv, 0.0, 1.0)
-                w = np.where(st[hm] == 2, 1.25, 0.95).astype(np.float32) * np.exp(-0.5 * ft)
-                tvv = np.where(st[hm] == 2, 0.62, 0.46).astype(np.float32)
-                if not valid.all():
-                    sx, sy, w, tvv, ft = sx[valid], sy[valid], w[valid], tvv[valid], ft[valid]
-                if sx.size:
-                    xs.append(sx * k); ys.append(sy * k); ws.append(w * self._halo_gain(f, k, proj)); ts.append(tvv)
-                    dqs.append((ft * _DQ_SPAN + 100.0))
-                    have = True
-        if not have:
+                amp = np.where(st[hm] == 2, 1.0, 0.8).astype(np.float32)
+                tvv = np.where(st[hm] == 2, 0.60, 0.44).astype(np.float32)
+                add(sx, sy, d, amp, tvv, _GLOW_HALO_SIGMA, 0.5, dlo, span, _GLOW_GAIN_HALO)
+        if self._n_sol and proj.sol is not None:
+            am = np.flatnonzero(self._sol_role == 1)
+            if am.size:
+                if am.size > 700:
+                    am = am[:: int(math.ceil(am.size / 700.0))]
+                sx, sy, d, ps = (a[am] for a in proj.sol)
+                add(sx, sy, d, np.float32(0.7), np.float32(_ANCHOR_T), _GLOW_ANCHOR_SIGMA, 0.35, dlo, span, _GLOW_GAIN_ANCHOR)
+        if not xs:
             return None
         X = np.concatenate(xs) if len(xs) > 1 else xs[0]
         Y = np.concatenate(ys) if len(ys) > 1 else ys[0]
@@ -1761,81 +2031,71 @@ class SceneView(QtWidgets.QWidget):
 
         Wg = (Wr + f - 1) // f + 2          # padded grid: one guard cell on each side
         Hg = (Hr + f - 1) // f + 2
-        # occlusion by the opaque depth buffer: block-min of the z-buffer
+        npx = Hg * Wg
         gx = X / f - 0.5 + 1.0
         gy = Y / f - 0.5 + 1.0
-        zb = None
-        hb, wb = (Hr // f), (Wr // f)
-        if hb > 0 and wb > 0:
-            z16 = buf.view(np.uint16).reshape(Hr, Wr, 2)[:, :, 1]
-            blk = z16[:hb * f, :wb * f].reshape(hb, f, wb, f).min(axis=(1, 3))
-            if (blk != 0xFFFF).any():
-                zb = blk
-        if zb is not None:
-            bi = np.clip((Y / f).astype(np.int32), 0, hb - 1)
-            bj = np.clip((X / f).astype(np.int32), 0, wb - 1)
-            zf = zb[bi, bj].astype(np.float32) * np.float32(65536.0 / 65536.0)
-            # z16 holds dq of the nearest opaque sprite; margin in dq units (~2.2 Angstrom)
-            span = max(dhi - dlo, 1e-6)
-            margin = 2.2 / span * _DQ_SPAN
-            soft = 4.5 / span * _DQ_SPAN
-            over = (DQ.astype(np.float32) - zf - np.float32(margin)) / np.float32(soft)
-            vis = np.where(zf >= 65535.0, 1.0, 1.0 - np.clip(over, 0.0, 1.0) * 0.88).astype(np.float32)
-            Wt = Wt * vis
+        # depth of the nearest opaque sprite at the source's own pixel decides: in front of it or behind it
+        Wp = Wr + 2
+        ix = np.clip((X + 0.5).astype(np.int32), 0, Wr - 1)
+        iy = np.clip((Y + 0.5).astype(np.int32), 0, Hr - 1)
+        zpix = buf.view(np.uint16)[1::2][(iy + 1) * Wp + ix + 1]
+        margin = _GLOW_FRONT_MARGIN / span * _DQ_SPAN
+        behind = DQ > (zpix.astype(np.float32) + np.float32(margin))
         inb = (gx >= 0) & (gx < Wg - 1) & (gy >= 0) & (gy < Hg - 1)
         if not inb.all():
-            gx, gy, Wt, T = gx[inb], gy[inb], Wt[inb], T[inb]
+            gx, gy, Wt, T, behind = gx[inb], gy[inb], Wt[inb], T[inb], behind[inb]
         if gx.size == 0:
             return None
+        any_behind = bool(behind.any())
         x0 = np.floor(gx).astype(np.int64)
         y0 = np.floor(gy).astype(np.int64)
         fx = (gx - x0).astype(np.float32)
         fy = (gy - y0).astype(np.float32)
-        base = y0 * Wg + x0
-        npx = Hg * Wg
+        base = y0 * Wg + x0 + np.where(behind, npx, 0)
         if interactive:
             idx = base + np.where(fx > 0.5, 1, 0) + np.where(fy > 0.5, Wg, 0)
-            A = np.bincount(idx, weights=Wt, minlength=npx)
-            B = np.bincount(idx, weights=Wt * T, minlength=npx)
+            A = np.bincount(idx, weights=Wt, minlength=2 * npx)
+            B = np.bincount(idx, weights=Wt * T, minlength=2 * npx)
         else:
             idx = np.concatenate((base, base + 1, base + Wg, base + Wg + 1))
             w4 = np.concatenate((Wt * (1 - fx) * (1 - fy), Wt * fx * (1 - fy), Wt * (1 - fx) * fy, Wt * fx * fy))
-            A = np.bincount(idx, weights=w4, minlength=npx)
-            B = np.bincount(idx, weights=w4 * np.tile(T, 4), minlength=npx)
-        acc = np.empty((2, Hg, Wg), np.float32)
-        acc[0] = A.reshape(Hg, Wg)
-        acc[1] = B.reshape(Hg, Wg)
+            A = np.bincount(idx, weights=w4, minlength=2 * npx)
+            B = np.bincount(idx, weights=w4 * np.tile(T, 4), minlength=2 * npx)
+        nsets = 2 if any_behind else 1
+        acc = np.empty((2 * nsets, Hg, Wg), np.float32)
+        for si in range(nsets):
+            acc[2 * si] = A[si * npx:(si + 1) * npx].reshape(Hg, Wg)
+            acc[2 * si + 1] = B[si * npx:(si + 1) * npx].reshape(Hg, Wg)
         acc = _blur121(acc)
         acc = _blur121(acc)
         acc *= np.float32(1.0 / 256.0)
-        a = acc[0, 1:-1, 1:-1]
-        b = acc[1, 1:-1, 1:-1]
-        tm = np.clip(b / (a + 1e-6), 0.0, 1.0)
-        ramp = th.ramp[(tm * 255.0 + 0.5).astype(np.int32)]                # (h, w, 3)
-        noise = _dither_grid(a.shape[0], a.shape[1])
-        if th.glow_add:
-            out = 1.0 - np.exp(-1.55 * a[..., None] * ramp * 1.0)
-        else:
-            alpha = 1.0 - np.exp(-1.45 * a)
-            out = 1.0 - alpha[..., None] * (1.0 - ramp)
-        out = out * 255.0 + noise
-        arr = np.empty((a.shape[0], a.shape[1], 4), np.uint8)
-        arr[..., 0] = np.clip(out[..., 2], 0, 255)
-        arr[..., 1] = np.clip(out[..., 1], 0, 255)
-        arr[..., 2] = np.clip(out[..., 0], 0, 255)
-        arr[..., 3] = 255
-        arr = np.ascontiguousarray(arr)
-        img = QtGui.QImage(arr.data, arr.shape[1], arr.shape[0], arr.shape[1] * 4, QtGui.QImage.Format.Format_RGB32)
-        return img, arr, f
-
-    def _glow_gain(self, f: int, k: float, proj: _Proj) -> float:
-        # brightness per point so that the look is roughly independent of zoom and cloud size
-        s = max(self._dn_h * proj.scale * k, 1e-3)               # lattice spacing in raster px
-        cell_pts = (f / s) ** 2                                  # points per grid cell (single layer)
-        return float(0.55 * min(1.0, 1.4 / max(cell_pts, 1e-3)) + 0.18)
-
-    def _halo_gain(self, f: int, k: float, proj: _Proj) -> float:
-        return float(0.9 * (f * f) / 9.0)
+        out = []
+        cov = None
+        if focus_idx is not None and focus_idx.size:               # interactive: cut focus sprites out at grid level
+            yy = focus_idx // Wp - 1
+            xx = focus_idx - (yy + 1) * Wp - 1
+            cidx = np.clip(yy // f, 0, Hg - 3) * (Wg - 2) + np.clip(xx // f, 0, Wg - 3)
+            cnt = np.bincount(cidx, minlength=(Hg - 2) * (Wg - 2)).reshape(Hg - 2, Wg - 2)
+            cov = np.clip(cnt * (1.6 / (f * f)), 0.0, 1.0).astype(np.float32)
+        for si in range(nsets):
+            a = acc[2 * si, 1:-1, 1:-1]
+            b = acc[2 * si + 1, 1:-1, 1:-1]
+            if si == 0 and cov is not None:
+                a = a * (1.0 - cov)
+            tm = np.clip(b / (a + 1e-7), 0.0, 2.0)
+            qa = np.sqrt(np.clip(a * np.float32(1.0 / th.TONE_AMAX), 0.0, 1.0)) * np.float32(255.0)
+            noise = _dither_tile(a.shape[0], a.shape[1])[..., 0]
+            qa = (qa + noise).astype(np.int32)
+            np.clip(qa, 0, 255, out=qa)
+            idx2 = (qa << 9) | (tm * 255.5).astype(np.int32)
+            arr = np.ascontiguousarray(th.tone.take(idx2))
+            img = QtGui.QImage(arr.data, arr.shape[1], arr.shape[0], arr.shape[1] * 4, QtGui.QImage.Format.Format_RGB32)
+            out.append((img, arr))
+        g = _Glow()
+        g.f = f
+        g.front = out[0]
+        g.behind = out[1] if nsets > 1 else None
+        return g
 
     # ---- scene assembly ----------------------------------------------------------------------------------
     def _build_scene(self, W: int, H: int, k: float, proj: _Proj, interactive: bool, aa: bool) -> _Scene:
@@ -1846,44 +2106,68 @@ class SceneView(QtWidgets.QWidget):
         sc.Wr, sc.Hr, sc.k, sc.interactive = Wr, Hr, k, interactive
         cx, cy, R, w0 = self._collect_sprites(proj, k, Wr, Hr, interactive)
         buf = self._splat(cx, cy, R, w0, Wr, Hr)
-        rgb = self._resolve(buf, Wr, Hr, aa and not interactive)
+        rgb, ci = self._resolve(buf, Wr, Hr, aa and not interactive)
         sc.spr_arr = rgb
-        sc.spr_img = QtGui.QImage(rgb.data, Wr, Hr, Wr * 4, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
-        g = self._build_glow(proj, k, Wr, Hr, buf, interactive)
+        Wp = Wr + 2
+        sc.spr_img = QtGui.QImage(rgb[Wp + 1:].data, Wr, Hr, Wp * 4, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+        fi = self._focus_pixels(buf, ci)
+        g = self._build_glow(proj, k, Wr, Hr, buf, interactive, fi if interactive else None)
         if g is not None:
-            sc.glow_img, sc.glow_arr, sc.glow_f = g
             if not interactive:
-                small = sc.glow_img.scaled(max(2, sc.glow_img.width() // 3), max(2, sc.glow_img.height() // 3),
-                                           _Qt.AspectRatioMode.IgnoreAspectRatio, _Qt.TransformationMode.SmoothTransformation)
-                sc.bloom_img = small
+                def small(src):
+                    im = src[0]
+                    return im.scaled(max(2, im.width() // 3), max(2, im.height() // 3),
+                                     _Qt.AspectRatioMode.IgnoreAspectRatio, _Qt.TransformationMode.SmoothTransformation)
+
+                mask = self._focus_mask(buf, fi, Wr, Hr)
+                g.comp_front = self._combine_glow(g.front[0], small(g.front), g.f, Wr, Hr, mask)
+                if g.behind is not None:
+                    g.comp_behind = self._combine_glow(g.behind[0], small(g.behind), g.f, Wr, Hr, None)
+                self._mask_keep = None
+            sc.glow = g
         sc.build_ms = (time.perf_counter() - t0) * 1000.0
         return sc
 
     def _compose(self, sc: _Scene, op: float) -> QtGui.QImage:
+        """background -> glow behind -> opaque spheres -> glow in front (screen on dark, multiply on light)."""
         base = self._bg_image(sc.Wr, sc.Hr)
         img = base.copy()
         p = QtGui.QPainter(img)
-        p.drawImage(0, 0, sc.spr_img)
-        if sc.glow_img is not None and op > 0.004:
-            p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
-            mode = (QtGui.QPainter.CompositionMode.CompositionMode_Plus if self._theme.glow_add
-                    else QtGui.QPainter.CompositionMode.CompositionMode_Multiply)
+        g = sc.glow
+        add = self._theme.glow_add
+        mode = (QtGui.QPainter.CompositionMode.CompositionMode_Screen if add
+                else QtGui.QPainter.CompositionMode.CompositionMode_Multiply)
+        op = min(1.0, max(0.0, op))
+
+        def glow_layer(main, comp):
+            if op <= 0.004 or (main is None and comp is None):
+                return
+            p.save()
             p.setCompositionMode(mode)
-            f = sc.glow_f
-            rect = QtCore.QRectF(-0.0, -0.0, sc.glow_img.width() * f, sc.glow_img.height() * f)
-            p.setOpacity(min(1.0, op))
-            p.drawImage(rect, sc.glow_img)
-            if sc.bloom_img is not None:
-                p.setOpacity(min(1.0, op) * (0.42 if self._theme.glow_add else 0.30))
-                p.drawImage(rect, sc.bloom_img)
+            p.setOpacity(op)
+            if comp is not None:
+                p.drawImage(0, 0, comp)
+            else:                                                     # interactive: scale the grid image directly
+                p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
+                p.drawImage(QtCore.QRectF(0.0, 0.0, main[0].width() * g.f, main[0].height() * g.f), main[0])
+            p.restore()
+
+        if g is not None:
+            glow_layer(g.behind, g.comp_behind)
+        p.drawImage(0, 0, sc.spr_img)
+        if g is not None:
+            glow_layer(g.front, g.comp_front)
         p.end()
         return img
 
     def _scene_key(self, Wr: int, Hr: int, interactive: bool):
-        return (self._cam_ver, self._data_ver, self._theme_ver, Wr, Hr, interactive, self._opts["solute_style"])
+        return (self._cam_ver, self._data_ver, self._theme_ver, Wr, Hr, interactive, self._opts["solute_style"],
+                self._lod if interactive else -1)
 
     def _ensure_final(self, W: int, H: int, dpr: float):
         interactive = bool(self._interacting)
+        if interactive:
+            self._rs, self._lod = _LEVELS[self._level]
         k = dpr * (self._rs if interactive else 1.0)
         Wr = max(1, int(round(W * k)))
         Hr = max(1, int(round(H * k)))
@@ -1894,18 +2178,51 @@ class SceneView(QtWidgets.QWidget):
             sc = self._build_scene(W, H, k, proj, interactive, aa=True)
             sc.key = key
             self._scene = sc
-            if interactive:                                    # adapt the interactive render scale
-                ms = sc.build_ms
-                if ms > 34.0:
-                    self._rs = max(0.45, self._rs * 0.86)
-                elif ms < 16.0:
-                    self._rs = min(1.0, self._rs * 1.08)
-        fade_q = int(round(min(1.0, max(0.0, self._dn_fade)) * 48))
-        fkey = (fade_q, self._dn_opacity(), self._theme_ver)
+            self._adapt_pending = interactive
+        op = min(1.0, max(0.0, self._dn_opacity() * self._dn_fade))
+        fkey = (int(round(op * 96.0)), self._theme_ver)
         if sc.final is None or sc.final_key != fkey:
-            sc.final = self._compose(sc, self._dn_opacity() * fade_q / 48.0)
+            sc.final = self._compose(sc, round(op * 96.0) / 96.0)
             sc.final_key = fkey
+            sc.static = None
         return sc, proj
+
+    def _static_image(self, sc: _Scene, W: int, H: int, proj: _Proj) -> Optional[QtGui.QImage]:
+        """The composed scene with the camera-dependent static overlays baked in, so that ring pulses and hover
+        updates only blit one image and draw a few shapes.  Not used while interacting (overlays stay crisp)."""
+        if sc.interactive:
+            return None
+        key = (sc.final_key, self._ovl_ver)
+        if sc.static is not None and sc.static_key == key:
+            return sc.static
+        img = sc.final.copy()
+        p = QtGui.QPainter(img)
+        p.scale(img.width() / float(W), img.height() / float(H))
+        self._paint_static(p, W, H, proj)
+        p.end()
+        sc.static, sc.static_key = img, key
+        return img
+
+    def _adapt_quality(self, ms: float) -> None:
+        """Walk the interaction quality ladder so mouse-rotate frames stay near the target frame time."""
+        self._ema_ms = ms if self._ema_ms <= 0 else 0.5 * self._ema_ms + 0.5 * ms
+        last = len(_LEVELS) - 1
+        if self._ema_ms > _TARGET_MS:
+            self._viol = max(self._viol, 0) + 1
+            far = self._ema_ms > 2.0 * _TARGET_MS
+            if (self._viol >= 2 or far) and self._level < last:
+                self._level = min(last, self._level + (1 + (self._ema_ms > 2.0 * _TARGET_MS)
+                                                       + (self._ema_ms > 4.0 * _TARGET_MS)))
+                self._viol = 0
+                self._ema_ms = 0.0                                  # measure the new level from scratch
+        elif self._ema_ms < 0.5 * _TARGET_MS:
+            self._viol = min(self._viol, 0) - 1
+            if self._viol <= -10 and self._level > 0:
+                self._level -= 1
+                self._viol = 0
+                self._ema_ms = 0.0
+        else:
+            self._viol = 0
 
     # =============================================================================================== painting
     def paintEvent(self, ev) -> None:  # noqa: N802
@@ -1915,7 +2232,8 @@ class SceneView(QtWidgets.QWidget):
             W, H = max(1, self.width()), max(1, self.height())
             dpr = float(self.devicePixelRatioF())
             sc, proj = self._ensure_final(W, H, dpr)
-            final = sc.final
+            baked = self._static_image(sc, W, H, proj)
+            final = baked if baked is not None else sc.final
             if abs(sc.k - dpr) < 1e-6 and final.width() == int(round(W * dpr)):
                 final.setDevicePixelRatio(dpr)
                 p.drawImage(0, 0, final)
@@ -1923,7 +2241,10 @@ class SceneView(QtWidgets.QWidget):
                 p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
                 p.drawImage(QtCore.QRectF(0, 0, W, H), final)
                 p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, False)
-            self._paint_overlays(p, W, H, proj, export=False)
+            self._set_hints(p)
+            if baked is None:
+                self._paint_static(p, W, H, proj)
+            self._paint_dynamic(p, W, H, proj, export=False)
             self._last_error = None
         except Exception:
             self._last_error = traceback.format_exc()
@@ -1933,28 +2254,38 @@ class SceneView(QtWidgets.QWidget):
         now = time.perf_counter()
         dur = (now - t0) * 1000.0
         self._last_paint_ms = dur
+        if self._adapt_pending and self._interacting:
+            self._adapt_pending = False
+            self._adapt_quality(dur)
         dt = now - self._last_paint_t if self._last_paint_t else 1.0
         inst = 1.0 / dt if dt < 0.25 else 1000.0 / max(dur, 0.5)
         self._fps = inst if self._fps <= 0 else 0.7 * self._fps + 0.3 * inst
         self._last_paint_t = now
 
     # ---- overlays ----------------------------------------------------------------------------------------
-    def _paint_overlays(self, p: QtGui.QPainter, W: int, H: int, proj: _Proj, export: bool) -> None:
+    @staticmethod
+    def _set_hints(p: QtGui.QPainter) -> None:
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
         p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
-        th = self._theme
+
+    def _paint_static(self, p: QtGui.QPainter, W: int, H: int, proj: _Proj) -> None:
+        """Overlays that only change with the camera, options or HUD text: box, axes gizmo, scale bar, HUD."""
+        self._set_hints(p)
         if self._opts["show_box"] and self._box_corners is not None:
             self._draw_box(p, proj)
-        self._draw_rings(p, proj)
-        if not export and self._hover is not None:
-            self._draw_hover(p, W, H)
         if self._opts["show_axes"]:
             self._draw_gizmo(p, W, H)
         if self._opts["show_scale_bar"]:
             self._draw_scale_bar(p, W, H, proj)
         if self._hud:
             self._draw_hud(p, W, H)
+
+    def _paint_dynamic(self, p: QtGui.QPainter, W: int, H: int, proj: _Proj, export: bool) -> None:
+        """Animated / pointer dependent overlays: pulse rings, hover ring and tooltip."""
+        self._set_hints(p)
+        self._draw_rings(p, proj)
         if not export and self._hover is not None:
+            self._draw_hover(p, W, H)
             self._draw_tooltip(p, W, H)
 
     def _draw_box(self, p: QtGui.QPainter, proj: _Proj) -> None:
@@ -2028,6 +2359,8 @@ class SceneView(QtWidgets.QWidget):
         pen = QtGui.QPen()
         pen.setCapStyle(_Qt.PenCapStyle.RoundCap)
         enter_col = _mix(th.c["ok"], (1, 1, 1), 0.25 if th.dark else 0.0)
+        a_gain = 1.0 if th.dark else 1.35                                      # light backgrounds need more ink
+        w_ring = 1.7 if th.dark else 2.1
         for i in ids:
             r0 = float(_RO[st[i]] * ps[i])
             x, y = float(sx[i]), float(sy[i])
@@ -2035,17 +2368,17 @@ class SceneView(QtWidgets.QWidget):
                 for off in (0.0, 0.5):
                     f = (ph + off) % 1.0
                     rad = r0 * (1.25 + 2.6 * f) + 1.5
-                    alpha = 0.95 * (1.0 - f) ** 1.4
-                    pen.setWidthF(1.7)
+                    alpha = min(1.0, 0.95 * a_gain * (1.0 - f) ** 1.4)
+                    pen.setWidthF(w_ring)
                     pen.setColor(_qcol(enter_col, alpha))
                     p.setPen(pen)
                     p.drawEllipse(QtCore.QPointF(x, y), rad, rad)
             else:
                 rad = r0 * 1.75 + 2.0
                 a = 0.62 + 0.28 * math.sin(2 * math.pi * ph)
-                p.setBrush(_qcol(th.c["solute"], 0.10))
-                pen.setWidthF(1.5)
-                pen.setColor(_qcol(th.c["solute"], a))
+                p.setBrush(_qcol(th.c["solute"], 0.12 if th.dark else 0.16))
+                pen.setWidthF(1.5 if th.dark else 1.9)
+                pen.setColor(_qcol(th.c["solute"], min(1.0, a * (1.0 if th.dark else 1.15))))
                 p.setPen(pen)
                 p.drawEllipse(QtCore.QPointF(x, y), rad, rad)
                 p.setBrush(_Qt.BrushStyle.NoBrush)
@@ -2208,6 +2541,7 @@ class SceneView(QtWidgets.QWidget):
         elif not self._hover_timer.isActive():
             self._hover_timer.start(17)
 
+    @_guarded
     def _do_hover(self) -> None:
         self._last_pick_t = time.perf_counter()
         mp = self._mouse_pos
@@ -2218,34 +2552,28 @@ class SceneView(QtWidgets.QWidget):
         if key != self._hover_key:
             self._hover_key = key
             self._hover = hit.get("_ui") if hit else None
-            self.hovered.emit({k: v for k, v in hit.items() if not k.startswith("_")} if hit else {})
+            self.hovered.emit(self._public(hit) if hit else {})
             self.update()
         elif hit:
             self.update()                                   # tooltip follows the cursor
 
     def _pick(self, x: float, y: float) -> Dict[str, Any]:
         proj = self._get_proj()
-        best = None
-        best_inside = None
-        # candidate = (score tuple, kind, array index, sx, sy, r)
+        # candidate = (score, depth, kind, array index, sx, sy, radius); score 0 = cursor inside the item's disc
         cands: List[Tuple[float, float, str, int, float, float, float]] = []
 
-        def scan(kind: str, layer, rad_px: np.ndarray, thr_min: float, pref: float, idx_filter=None):
+        def scan(kind: str, layer, rad_px: np.ndarray, thr_min: float, pref: float):
             sx, sy, d, ps = layer
             dx = sx - np.float32(x)
             dy = sy - np.float32(y)
             d2 = dx * dx + dy * dy
             thr = np.maximum(rad_px, thr_min)
             near = (d2 <= thr * thr) & (d > proj.near)
-            if idx_filter is not None:
-                near &= idx_filter
             ids = np.flatnonzero(near)
             if ids.size == 0:
                 return
             dist = np.sqrt(d2[ids])
             inside = dist <= rad_px[ids]
-            for j in range(min(ids.size, 64)) if ids.size <= 64 else []:
-                pass
             if inside.any():
                 ii = ids[inside]
                 jj = ii[np.argmin(d[ii])]
@@ -2275,29 +2603,41 @@ class SceneView(QtWidgets.QWidget):
         return self._payload(kind, i, sx, sy, r)
 
     def _payload(self, kind: str, i: int, sx: float, sy: float, r: float) -> Dict[str, Any]:
+        """Public payload {kind, index, label, pos, ...} (label exactly as supplied) + private ``_ui`` for the overlay."""
+        extra: Dict[str, Any] = {}
         if kind == "solvent":
             orig = int(self._sv_orig[i]) if self._sv_orig is not None else i
             lab = None
             if self._sv_labels is not None and 0 <= orig < len(self._sv_labels):
                 lab = str(self._sv_labels[orig])
             st = int(self._sv_state[i])
-            label = (lab if lab else f"Water {orig}") + f"  ·  {_STATE_NAMES[st]}"
+            label = lab if lab else f"Water {orig}"
+            shown = f"{label}  ·  {_STATE_NAMES[st]}"
             pos = self._sv_o[i]
+            extra["state"] = st
         elif kind == "solute":
             orig = int(self._sol_orig[i]) if self._sol_orig is not None else i
             lab = None
             if self._sol_labels is not None and 0 <= orig < len(self._sol_labels):
                 lab = str(self._sol_labels[orig])
             role = int(self._sol_role[i])
-            label = lab if lab else f"Atom {orig}" + ("  ·  zone anchor" if role == 1 else "")
+            label = lab if lab else f"Atom {orig}"
+            shown = label + ("  ·  zone anchor" if role == 1 else "")
             pos = self._sol_xyz[i]
+            extra["role"] = role
         else:
             orig = int(self._dn_orig[i]) if self._dn_orig is not None else i
-            label = f"Density {float(self._dn_val[i]):.3g}"
+            val = float(self._dn_val[i])
+            label = f"Density {val:.3g}"
+            shown = label
             pos = self._dn_xyz[i]
+            extra["value"] = val
         pt = (float(pos[0]), float(pos[1]), float(pos[2]))
-        ui = dict(kind=kind, sx=sx, sy=sy, r=max(r * 1.25 + 2.0, 6.0), label=label, pos=pt)
-        return {"kind": kind, "index": orig, "label": label, "pos": pt, "_ui": ui}
+        ui = dict(kind=kind, sx=sx, sy=sy, r=max(r * 1.25 + 2.0, 6.0), label=shown, pos=pt)
+        out = {"kind": kind, "index": orig, "label": label, "pos": pt}
+        out.update(extra)
+        out["_ui"] = ui
+        return out
 
 
 # =================================================================================================== free helpers
@@ -2308,53 +2648,71 @@ def _scatter(buf: np.ndarray, idx: np.ndarray, vals: np.ndarray) -> None:
         np.minimum.at(buf, idx, vals)
 
 
-def _DITHER_TILE(H: int, W: int) -> np.ndarray:
+def _dither_tile(H: int, W: int) -> np.ndarray:
     reps_y = (H + 63) // 64
     reps_x = (W + 63) // 64
     t = np.tile(_DITHER, (reps_y, reps_x, 1))[:H, :W, :]
     return t
 
 
-def _dither_grid(H: int, W: int) -> np.ndarray:
-    return _DITHER_TILE(H, W)
+_AVG_MASK = np.uint32(0xFEFEFEFE)
+
+
+def _aa_sprite_edges(buf: np.ndarray, rgb: np.ndarray, Wr: int) -> None:
+    """Soften the contour where a sprite overlaps a farther one (in place, premultiplied ``rgb``).
+
+    Sprites have a flat depth, so two neighbouring pixels with different depth belong to different sprites.  The
+    pixel on the FAR side of such a boundary is averaged with its nearer neighbour, i.e. the near sprite's outline
+    is anti-aliased against whatever lies behind it - the same model as the silhouette pass."""
+    Wp = Wr + 2
+    dq = np.ascontiguousarray(buf.view(np.uint16)[1::2])
+    cov = dq != 0xFFFF
+    for step in (1, Wp):
+        a, b = dq[:-step], dq[step:]
+        m = (a != b) & cov[:-step] & cov[step:]
+        idx = np.flatnonzero(m)
+        if idx.size == 0:
+            continue
+        left_far = a[idx] > b[idx]
+        far = np.where(left_far, idx, idx + step)
+        near = np.where(left_far, idx + step, idx)
+        cf = rgb[far]
+        cn = rgb[near]
+        rgb[far] = ((cf & _AVG_MASK) >> np.uint32(1)) + ((cn & _AVG_MASK) >> np.uint32(1))
 
 
 def _aa_edges(buf: np.ndarray, rgb: np.ndarray, Wr: int, Hr: int) -> None:
-    """Anti-alias the silhouette of the opaque layer (covered vs empty pixels) in place on the premultiplied rgb."""
-    cov = (buf != _EMPTY).reshape(Hr, Wr)
-    c8 = cov.view(np.uint8)
-    if not c8.any():
+    """Anti-alias the silhouette of the opaque layer in place (padded layout, premultiplied ``rgb``).
+
+    Coverage = pixel touched by a sprite.  Inner edge pixels keep most of their colour, the empty pixels next to
+    the silhouette receive a faint copy of the neighbouring colour: a 1.5 px soft edge at negligible cost."""
+    Wp = Wr + 2
+    Hp = Hr + 2
+    c8 = (buf != _EMPTY).view(np.uint8).reshape(Hp, Wp)
+    nbp = np.zeros((Hp, Wp), np.uint8)
+    inner = nbp[1:-1, 1:-1]
+    np.add(c8[:-2, 1:-1], c8[2:, 1:-1], out=inner)
+    inner += c8[1:-1, :-2]
+    inner += c8[1:-1, 2:]
+    ei = np.flatnonzero(nbp != (c8 << 2))
+    if ei.size == 0:
         return
-    p = np.zeros((Hr + 2, Wr + 2), np.uint8)
-    p[1:-1, 1:-1] = c8
-    nb = p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]
-    edge = np.flatnonzero(((c8 == 1) & (nb < 4)) | ((c8 == 0) & (nb > 0)))
-    if edge.size == 0:
-        return
-    cflat = c8.reshape(-1)
-    ecov = cflat[edge]
-    enb = nb.reshape(-1)[edge].astype(np.float32)
-    col = rgb[edge]
+    cf = c8.reshape(-1)
+    nf = nbp.reshape(-1)
+    ecov = cf[ei]
+    enb = nf[ei].astype(np.float32)
+    col = rgb[ei]
     outer = ecov == 0
     if outer.any():
-        oi = edge[outer]
-        x = oi % Wr
-        cand_idx = [oi - 1, oi + 1, oi - Wr, oi + Wr]
-        valid = [x > 0, x < Wr - 1, oi >= Wr, oi < (Hr - 1) * Wr]
-        pick = np.zeros(oi.size, np.uint32)
-        have = np.zeros(oi.size, bool)
-        for ci, vm in zip(cand_idx, valid):
-            ci = np.clip(ci, 0, cflat.size - 1)
-            m = vm & (cflat[ci] == 1) & ~have
-            if m.any():
-                pick[m] = rgb[ci[m]]
-                have |= m
+        oi = ei[outer]
+        nbr = oi[:, None] + np.array([-1, 1, -Wp, Wp], np.int64)[None, :]
+        cov4 = cf[nbr]
+        j = cov4.argmax(axis=1)
         col = col.copy()
-        col[outer] = pick
-    a = np.where(ecov == 1, np.where(enb == 0, 0.80, (4.0 + enb) / 8.0), enb / 8.0).astype(np.float32)
+        col[outer] = rgb[nbr[np.arange(oi.size), j]]
+    a = np.where(ecov == 1, np.where(enb == 0, 0.80, (4.0 + enb) * 0.125), enb * 0.125).astype(np.float32)
     r = ((col >> np.uint32(16)) & np.uint32(255)).astype(np.float32)
     g = ((col >> np.uint32(8)) & np.uint32(255)).astype(np.float32)
     b = (col & np.uint32(255)).astype(np.float32)
-    out = ((a * 255.0 + 0.5).astype(np.uint32) << np.uint32(24)) | ((r * a + 0.5).astype(np.uint32) << np.uint32(16)) \
-        | ((g * a + 0.5).astype(np.uint32) << np.uint32(8)) | (b * a + 0.5).astype(np.uint32)
-    rgb[edge] = out
+    rgb[ei] = (((a * 255.0 + 0.5).astype(np.uint32) << np.uint32(24)) | ((r * a + 0.5).astype(np.uint32) << np.uint32(16))
+               | ((g * a + 0.5).astype(np.uint32) << np.uint32(8)) | (b * a + 0.5).astype(np.uint32))

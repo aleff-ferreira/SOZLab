@@ -79,7 +79,9 @@ def build_trust(soz_results: Dict[str, object], density_results: Dict[str, objec
             if _fin(ch) and abs(ch) > 0.10:
                 add("caution", "residence.stride_sensitive", scope,
                     f"The residence time changes by {100 * ch:+.0f}% with {m}x coarser sampling: the sampling interval is not "
-                    "short compared with the zone's boundary crossings, so the value depends on the stride. Quote it with its interval.")
+                    "short compared with the zone's boundary crossings, so the value depends on the stride. Quote it with its interval, or set a "
+                    "brief-exit tolerance (conventionally ~2 ps for water, Impey et al. 1983), which keeps it stable while the stride is "
+                    "shorter than the tolerance.")
                 break
         for row in (res.stride_sensitivity or [])[1:]:
             ch = row.get("entry_rate_per_time_rel_change")

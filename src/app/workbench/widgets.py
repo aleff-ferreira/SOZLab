@@ -26,6 +26,13 @@ def make_label(text: str = "", role: str = "body", word_wrap: bool = False, sele
     return lab
 
 
+def dispose(widget: QtWidgets.QWidget) -> None:
+    """Remove a widget now (hidden and unparented, so it can never be painted again) and free it later."""
+    widget.hide()
+    widget.setParent(None)
+    widget.deleteLater()
+
+
 class ElideLabel(QtWidgets.QLabel):
     """Single-line label that elides with an ellipsis instead of widening its container (full text in the tooltip)."""
 
@@ -123,7 +130,7 @@ class FlowLayout(QtWidgets.QLayout):
             w = it.widget()
             if w is not None:
                 w.setParent(None)
-                w.deleteLater()
+                dispose(w)
 
 
 # ------------------------------------------------------------------------------------------------ chips
@@ -394,14 +401,15 @@ class Card(QtWidgets.QFrame):
         toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         set_prop(toggle, "variant", "ghost")
         toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        toggle.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        # Ignored (not Expanding): the toggle may shrink, so the chip and Reset button never push the card wider than its rail
+        toggle.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         toggle.setToolTip("Optional settings: every one can be adjusted, compared with the default and reset")
         self._adv_toggle = toggle
         self._adv_count = Chip("", "warn")
         self._adv_count.hide()
         reset_all = QtWidgets.QToolButton()
         set_prop(reset_all, "variant", "ghost")
-        reset_all.setText("Reset all")
+        reset_all.setText("Reset")
         reset_all.setToolTip("Reset every advanced setting of this card to its default")
         reset_all.hide()
         self._adv_reset_all = reset_all
@@ -786,7 +794,8 @@ class ToastHost(QtCore.QObject):
         frame = QtWidgets.QFrame(self._parent)
         frame.setObjectName("Plate")
         accent = {"ok": t.t["ok"], "warn": t.t["warn"], "err": t.t["err"]}.get(kind, t.t["accent"])
-        frame.setStyleSheet(f"QFrame#Plate {{ border: 1px solid {accent}; background: {t.t['bg3']}; border-radius: 12px; }}")
+        frame.setStyleSheet(f"QFrame#Plate {{ border: 1px solid {accent}; background: {t.t['bg3']}; border-radius: 12px; }} "
+                            f"QLabel {{ color: {t.t['ink']}; background: transparent; }}")
         lay = QtWidgets.QHBoxLayout(frame)
         lay.setContentsMargins(14, 10, 14, 10)
         ic = QtWidgets.QLabel()
@@ -809,7 +818,10 @@ class ToastHost(QtCore.QObject):
         fade_in.start()
 
         def close():
-            fade = QtCore.QPropertyAnimation(effect, b"opacity", frame)
+            try:
+                fade = QtCore.QPropertyAnimation(effect, b"opacity", frame)
+            except RuntimeError:  # the window (and with it this toast) is already gone
+                return
             fade.setDuration(0 if t.reduce_motion else 260)
             fade.setStartValue(1.0)
             fade.setEndValue(0.0)
@@ -822,7 +834,10 @@ class ToastHost(QtCore.QObject):
             fade.finished.connect(done)
             fade.start()
 
-        QtCore.QTimer.singleShot(ms, close)
+        timer = QtCore.QTimer(frame)  # owned by the toast: cancelled automatically if the window closes first
+        timer.setSingleShot(True)
+        timer.timeout.connect(close)
+        timer.start(ms)
 
     def _layout(self) -> None:
         pw, ph = self._parent.width(), self._parent.height()
