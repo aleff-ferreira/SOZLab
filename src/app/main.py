@@ -22,6 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--theme", choices=("dark", "light"), help="colour theme (remembered between sessions)")
     p.add_argument("--reduce-motion", action="store_true", help="turn off animations")
     p.add_argument("--version", action="store_true", help="print the version and exit")
+    p.add_argument("--quit-after", type=int, metavar="MS", help=argparse.SUPPRESS)  # automated smoke tests: exit after MS milliseconds
+    p.add_argument("--no-remember", action="store_true", help="do not read or write saved settings (theme, window geometry)")
     return p
 
 
@@ -43,12 +45,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     app.setApplicationVersion(__version__)
     settings = QtCore.QSettings("SOZLab", "Workbench")
     theme = Theme.instance()
-    theme.mode = args.theme or str(settings.value("theme", "dark"))
-    theme.reduce_motion = bool(args.reduce_motion or str(settings.value("reduce_motion", "false")).lower() == "true")
+    saved = (lambda key, default: default) if args.no_remember else settings.value
+    theme.mode = args.theme or str(saved("theme", "dark"))
+    theme.reduce_motion = bool(args.reduce_motion or str(saved("reduce_motion", "false")).lower() == "true")
     theme.apply(app)
     win = WorkbenchWindow()
     win.btn_motion.setChecked(theme.reduce_motion)
-    geom = settings.value("geometry")
+    geom = saved("geometry", None)
     if geom is not None:
         win.restoreGeometry(geom)
     win.show()
@@ -58,13 +61,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         settings.setValue("reduce_motion", "true" if theme.reduce_motion else "false")
         settings.setValue("geometry", win.saveGeometry())
 
-    app.aboutToQuit.connect(remember)
+    if not args.no_remember:
+        app.aboutToQuit.connect(remember)
     if args.files:
         QtCore.QTimer.singleShot(0, lambda: win.session.open_paths(args.files) if not args.files[0].lower().endswith(".json")
                                  else win._open_project_path(args.files[0]))
     elif args.demo:
         QtCore.QTimer.singleShot(0, win.load_demo)
-    return app.exec()
+    if args.quit_after:
+        QtCore.QTimer.singleShot(int(args.quit_after), app.quit)
+    code = app.exec()
+    win.session.shutdown()
+    return code
 
 
 if __name__ == "__main__":

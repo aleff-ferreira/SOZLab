@@ -90,9 +90,9 @@ see. The first version of the estimator (autocorrelation only) covered 75 % of 0
 Water in the first shell of Na⁺ (r_c = 3.2 Å). Top: one 0.4 ns trajectory written every 0.02 ps (5 ions; SE 0.8–2.6 ps). Bottom: four 2 ns
 trajectories (SD across replicas 0.3–0.9 ps).
 
-| Δt (ps) | 0.02 | 0.04 | 0.08 | 0.16 | 0.32 | 0.64 | 1.28 | | |
-|---|---|---|---|---|---|---|---|---|---|
-| τ continuous (ps) | 12.2 | 12.6 | 13.1 | 14.4 | 16.8 | 19.6 | 22.6 | | |
+| Δt (ps) | 0.02 | 0.04 | 0.08 | 0.16 | 0.32 | 0.64 | 1.28 |
+|---|---|---|---|---|---|---|---|
+| τ continuous (ps) | 12.2 | 12.6 | 13.1 | 14.4 | 16.8 | 19.6 | 22.6 |
 
 | Δt (ps) | 0.2 | 1.0 | 2.0 | 5.0 | 10.0 |
 |---|---|---|---|---|---|

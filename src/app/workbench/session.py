@@ -101,6 +101,7 @@ class Session(QtCore.QObject):
         self.selection_message = ""
         self._snap_counter = 0
         self._run_signature = ""
+        self._restore_run = False
         self.preview_frame = 0
         self.preview = PreviewService(self)
         self.preview.loaded.connect(self._on_loaded)
@@ -194,8 +195,11 @@ class Session(QtCore.QObject):
             self.zone.anchor = pick["selection"]
             self.zone.name = "Zone"
         n = int(summary["n_frames"])
-        self.run.frame_stop = None
-        self.run.stride = 1 if n <= 3000 else max(1, n // 2000)
+        if self._restore_run:  # settings came from a project file: they are the user's, not defaults to recompute
+            self._restore_run = False
+        else:
+            self.run.frame_stop = None
+            self.run.stride = 1 if n <= 3000 else max(1, n // 2000)
         self.summaryReady.emit(summary)
         self.zoneChanged.emit()
         self.stepsChanged.emit()
@@ -543,9 +547,11 @@ class Session(QtCore.QObject):
                 self.zone.name = proj.sozs[0].name
             self.solvent.resnames = list(proj.solvent.water_resnames)
             self.solvent.probe_selection = proj.solvent.probe.selection
+            self.solvent.auto = False  # the project names its solvent explicitly: do not overwrite it with detection
             self.run.stride, self.run.frame_start, self.run.frame_stop = proj.analysis.stride, proj.analysis.frame_start, proj.analysis.frame_stop
             self.run.output_dir = proj.outputs.output_dir
         inp = data["inputs"]
+        self._restore_run = True
         self.open_inputs(inp["topology"], inp.get("trajectory"))
 
     def shutdown(self) -> None:

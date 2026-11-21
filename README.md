@@ -67,6 +67,9 @@ sozlab-cli verify results/
 sozlab-cli selftest             # known-answer checks on this installation (about 10 seconds)
 ```
 
+No data at hand? `python examples/make_demo_data.py` writes a small synthetic system and `examples/demo_project.json`; then
+`sozlab-cli run --project examples/demo_project.json --output demo_results --report`.
+
 Projects written by v2.0 still open (folder menu → *Open a project file…* in the Workbench, `--project` in the CLI); a project saved
 from the Workbench runs unchanged with the CLI.
 

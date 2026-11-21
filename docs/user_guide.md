@@ -69,14 +69,13 @@ definition. The strip above the tiles repeats the settings that produced the num
 |---|---|---|
 | In zone | mean number of solvent molecules in the zone | SE accounts for autocorrelation |
 | Occupied | fraction of frames with at least one molecule | |
-| Residence τ | time a molecule stays: the integral of the survival function S(τ) | depends on Δt; see *Sampling* |
+| Residence τ | time a molecule stays: the integral of the survival function S(τ); hover for the number of visits behind it | depends on Δt; see *Sampling* |
 | Entry rate | entry events per unit time | depends on Δt (re-crossings between frames are missed) |
-| Visits | number of separate visits observed | how many were complete or cut by the window |
 
-**Tabs:** *Occupancy* (timeline with mean and 95 % interval, distribution), *Residence* (S(τ), visit statistics, Kaplan–Meier),
+**Tabs:** *Occupancy* (timeline with mean and 95 % interval, distribution), *Residence* (S(τ), visit counts and statistics, Kaplan–Meier),
 *Entries / exits*, *Sampling* (how τ changes with the frame interval, with an experimental extrapolation to Δt → 0),
 *Density* (three slices, ρ / g(r) / −ln g / SE, unreliable voxels hidden), *Tables* (per molecule, per visit, per frame).
-Drag the cursor on the timeline to move the 3D view to that frame.
+Drag the cursor on the timeline to move the 3D view to that frame. The fold button at the right of the frame slider hides the 3D view to give the charts the full height.
 
 **Trust** (right rail) lists every caveat the engine raised, in plain language, for example *"the residence time changes by
 +32 % with 2× coarser sampling: quote it with its interval"*. If the list is empty, the numbers can be used as shown.
@@ -118,5 +117,7 @@ sozlab-cli verify results/                               # manifest and input-id
 sozlab-cli selftest                                      # synthetic known-answer checks
 ```
 
-A project file is the JSON written by the folder menu → *Save project…* in the Workbench (it also contains the Workbench's own settings, which the CLI ignores) (or by hand; see `examples/`). Projects from
-v2.0 open unchanged. Unknown or misspelled parameters are reported as warnings, never silently replaced by defaults.
+A project file is the JSON written by the folder menu → *Save project…* in the Workbench. It also holds the Workbench's own
+settings, which the CLI ignores. You can write one by hand: `python examples/make_demo_data.py` produces a runnable example, and
+`examples/gromacs_template_project.json` is a template. Projects from v2.0 open unchanged. Unknown or misspelled parameters
+are reported as warnings, never silently replaced by defaults.

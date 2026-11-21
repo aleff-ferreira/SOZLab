@@ -282,12 +282,36 @@ def test_everything_primary_fits_at_1366x768(qtbot, loaded):
 
 def test_project_round_trip_restores_the_setup(qtbot, loaded, tmp_path):
     loaded.zone_card.cutoff.setValue(4.2)
+    loaded.session.set_run(stride=2, gap_time=1.5, blocks=7)
+    loaded.session.set_zone(shells=[4.5, 6.0])
     path = str(tmp_path / "p.json")
     loaded.session.save_project(path)
     loaded.session.zone.cutoff = 3.0
+    loaded.session.set_run(stride=1, gap_time=0.0, blocks=5)
     with qtbot.waitSignal(loaded.session.summaryReady, timeout=30000):
         loaded.session.load_project(path)
-    assert loaded.session.zone.cutoff == pytest.approx(4.2)
+    s = loaded.session
+    assert s.zone.cutoff == pytest.approx(4.2)
+    # run settings are the user's: opening the files again must not replace them with defaults
+    assert (s.run.stride, s.run.gap_time, s.run.blocks) == (2, 1.5, 7)
+    assert s.zone.shells == [4.5, 6.0] and loaded.zone_card.f_shells.value() == "4.5, 6"  # advanced zone settings are shown again
+
+
+def test_a_plain_cli_project_opens_in_the_workbench(qtbot, loaded, tmp_path):
+    """The other direction: a project written for the CLI (no Workbench block) opens with its zone, solvent and stride."""
+    from engine.analysis import write_project_json
+
+    s = loaded.session
+    s.set_run(stride=3)
+    s.zone.cutoff = 4.7
+    proj = s.build_project()
+    path = str(tmp_path / "cli_project.json")
+    write_project_json(proj, path)
+    s.zone.cutoff, s.run.stride = 3.0, 1
+    with qtbot.waitSignal(s.summaryReady, timeout=30000):
+        s.load_project(path)
+    assert s.zone.cutoff == pytest.approx(4.7) and s.run.stride == 3
+    assert s.zone.anchor == "resname LIG" and s.solvent.resnames == ["SOL"]
 
 
 def test_demo_loads_without_any_files(qtbot, window):

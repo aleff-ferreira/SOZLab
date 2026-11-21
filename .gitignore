@@ -46,3 +46,7 @@ bench/out/
 .*_offsets.npz
 .*_offsets.lock
 .sozlab_extract_*/
+
+# Generated example data (python examples/make_demo_data.py)
+examples/data/
+demo_results/
