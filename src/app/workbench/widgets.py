@@ -17,8 +17,25 @@ def _theme() -> Theme:
     return Theme.instance()
 
 
+class WrapLabel(QtWidgets.QLabel):
+    """Word-wrapped label that may shrink below its longest word. A long unbreakable string (a file path in an error message)
+    is clipped at the label's edge instead of widening the whole panel; the full text is available as the tooltip."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+
+    def minimumSizeHint(self):  # noqa: N802
+        return QtCore.QSize(0, super().minimumSizeHint().height())
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        super().setText(text)
+        if self.textFormat() != Qt.TextFormat.RichText:
+            self.setToolTip(text if len(text) > 48 else "")
+
+
 def make_label(text: str = "", role: str = "body", word_wrap: bool = False, selectable: bool = False) -> QtWidgets.QLabel:
-    lab = QtWidgets.QLabel(text)
+    lab = WrapLabel(text) if word_wrap else QtWidgets.QLabel(text)
     lab.setProperty("role", role)
     lab.setWordWrap(word_wrap)
     if selectable:
@@ -757,6 +774,7 @@ class Segmented(QtWidgets.QWidget):
             b = QtWidgets.QPushButton(text)
             b.setCheckable(True)
             set_prop(b, "variant", "seg")
+            set_prop(b, "pos", "first" if i == 0 else ("last" if i == len(options) - 1 else "mid"))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             group.addButton(b)
             lay.addWidget(b)

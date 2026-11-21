@@ -399,3 +399,23 @@ def test_folding_the_3d_view_gives_the_charts_the_height(qtbot, loaded):
     win.stage.fold.setChecked(False)
     qtbot.wait(150)
     assert win.stage.stack.isVisible() and abs(win.results_scroll.height() - before) < 30
+
+
+def test_right_rail_pages_never_exceed_their_width(qtbot, loaded):
+    """Regression: the Export page needed 397 px in a 294 px rail, clipping its buttons, rule selector and file paths."""
+    run(qtbot, loaded)
+    win = loaded
+    long_path = os.sep.join(["C:", "Users", "someone", "AppData", "Local", "Temp", "a_rather_long_folder_name", "second_level_folder",
+                             "third_level_folder", "export"])
+    win.export.exp_status.setText("✓ Saved to " + long_path)
+    win.export.ext_status.setText("✓ Written to " + long_path)
+    win.export.links_host.show()
+    for size in ((1100, 680), (1366, 768), (1920, 1080)):
+        win.resize(*size)
+        qtbot.wait(120)
+        for key in ("trust", "runs", "export"):
+            win.right.show_page(key)
+            qtbot.wait(60)
+            sa = win.right.stack.currentWidget()
+            need = sa.widget().minimumSizeHint().width()
+            assert need <= sa.viewport().width(), f"{key} at {size}: needs {need}px, the rail has {sa.viewport().width()}px"

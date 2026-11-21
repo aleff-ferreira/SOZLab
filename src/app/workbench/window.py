@@ -315,6 +315,12 @@ class StageView(QtWidgets.QFrame):
         if out.get("n_entered") or out.get("n_left"):
             extra = f"  (+{out['n_entered']} / −{out['n_left']})"
         i = self.slider.value()
+        if hasattr(self.scene, "set_hud"):  # the same facts on the canvas itself (they survive a screenshot of the 3D view)
+            zone = self.session.zone
+            lines = [zone.describe() if zone.is_defined else "no zone yet"]
+            lines.append(f"frame {out['frame']}   t = {t:.4g} ps" if t is not None else f"frame {out['frame']}")
+            lines.append(f"in zone {out['n_in_zone']}" + (f"   +{out['n_entered']} / -{out['n_left']}" if out.get("n_entered") or out.get("n_left") else ""))
+            self.scene.set_hud(lines)
         self.readout.setText(f"frame {out['frame']}  ·  {t:.4g} ps  ·  {out['n_in_zone']} in zone{extra}" if t is not None else f"frame {out['frame']}")
         self.readout.setToolTip(f"Frame {i + 1} of {len(self._frames)} analysed; green = entered since the previous analysed frame, coral = left")
 

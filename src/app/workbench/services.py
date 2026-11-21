@@ -115,6 +115,34 @@ def scan_inputs(topology: str, trajectory: Optional[str]) -> Dict[str, object]:
         }
 
 
+def place_near_anchors(anchor_pos: np.ndarray, anchor_disp: np.ndarray, probe_pos: np.ndarray, box, radius: float, cap: int = 4000):
+    """Pick the solvent to draw: every molecule within ``radius`` of *any* anchor atom (minimum image), each placed next to the
+    anchor atom it is nearest to, so a shell stays whole wherever the anchor sits in the periodic cell. Returns
+    ``(selected probe indices, displayed positions for all probes (NaN where not shown), distance to the nearest anchor)``."""
+    from MDAnalysis.lib import distances
+
+    from engine.periodic import minimum_image
+
+    dims = None if box is None else np.asarray(box.dims, dtype=np.float32)
+    pairs, d = distances.capped_distance(np.asarray(anchor_pos, np.float32), np.asarray(probe_pos, np.float32), max_cutoff=float(radius),
+                                         box=dims, return_distances=True)
+    shown = np.full((len(probe_pos), 3), np.nan)
+    dist = np.full(len(probe_pos), np.inf)
+    if len(pairs) == 0:
+        return np.empty(0, np.int64), shown, dist
+    order = np.lexsort((d, pairs[:, 1]))
+    pj, ai, dd = pairs[order, 1], pairs[order, 0], np.asarray(d)[order]
+    first = np.concatenate([[True], pj[1:] != pj[:-1]])
+    pj, ai, dd = pj[first], ai[first], dd[first]
+    vec = np.asarray(probe_pos, np.float64)[pj] - np.asarray(anchor_pos, np.float64)[ai]
+    if box is not None:
+        vec = minimum_image(vec, box)
+    shown[pj] = np.asarray(anchor_disp, np.float64)[ai] + vec
+    dist[pj] = dd
+    sel = pj if len(pj) <= cap else pj[np.argsort(dd)[:cap]]
+    return np.sort(sel), shown, dist
+
+
 # ------------------------------------------------------------------------------------------------ preview
 class PreviewWorker(QtCore.QObject):
     loaded = QtCore.pyqtSignal(object)
@@ -259,15 +287,23 @@ class PreviewWorker(QtCore.QObject):
         roles = np.zeros(len(solute_idx), np.uint8)
         if len(anchor_idx):
             roles[np.isin(solute_idx, anchor_idx)] = 1
-        # solvent (probe atoms): wrap to the image nearest the anchor centre, keep those in the view radius
+        # solvent (probe atoms). With an anchor: the molecules near any anchor atom, each drawn beside its nearest anchor atom, so big solutes
+        # and several separate anchors (ions, ligands) all show whole shells. Without one: a ball around the solute.
         pxyz, owner = (pos[lay.probe_idx], lay.probe_owner)
         pxyz = np.asarray(pxyz, dtype=np.float64)
-        wrapped = center + minimum_image(pxyz - center, box) if box is not None else pxyz
-        radius = float(req.get("view_radius", 16.0))
-        dist = np.linalg.norm(wrapped - center, axis=1)
-        sel = np.flatnonzero(dist <= radius)
-        if len(sel) > 4000:
-            sel = sel[np.argsort(dist[sel])[:4000]]
+        if len(anchor_idx):
+            from engine.soz_eval import max_cutoff_angstrom
+
+            reach = max_cutoff_angstrom(soz.root) if soz is not None else 3.5
+            a_pos = np.asarray(pos[anchor_idx], dtype=np.float64)
+            a_disp = center + minimum_image(a_pos - center, box) if box is not None else a_pos
+            sel, wrapped, _dist = place_near_anchors(a_pos, a_disp, pxyz, box, max(reach + 8.0, 12.0))
+        else:
+            wrapped = center + minimum_image(pxyz - center, box) if box is not None else pxyz
+            dist = np.linalg.norm(wrapped - center, axis=1)
+            sel = np.flatnonzero(dist <= 16.0)
+            if len(sel) > 4000:
+                sel = sel[np.argsort(dist[sel])[:4000]]
         # one probe per molecule for display
         first_per_mol = {}
         for k in sel:

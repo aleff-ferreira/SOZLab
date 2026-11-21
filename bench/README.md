@@ -8,6 +8,7 @@
 | `validate/dt_extrapolation.py` | residence time vs sampling interval on 0.02 ps data; accuracy of the Δt → 0 extrapolation | `docs/evidence/data/dt_extrapolation.json` |
 | `validate/mdanalysis_reference.py` | zone membership vs MDAnalysis `around` on the public triclinic `adk_oplsaa` system | `docs/evidence/data/mdanalysis_reference.json` |
 | `validate/perf_compare.py` | wall time and peak memory, v2.0.0 vs this tree | `docs/evidence/data/perf_compare.jsonl` |
+| `media/make_demo_video.py` + `media/make_assets.py` | the one-minute demo video, the README loop (GIF), the poster and the GitHub social-preview image, filmed from the real application (offscreen, scripted, nothing mocked) | `docs/media/` |
 | `gui/usability_walkthrough.py` | scripted first-use tasks and recovery scenarios on the real widgets, with screenshots | `docs/evidence/data/usability_walkthrough.json`, `docs/evidence/screens/` |
 
 Everything writes to `bench/out/` or `docs/evidence/`; nothing here is needed to use SOZLab. See `docs/evidence/README.md` for the results and `docs/developer_guide.md` for the commands.

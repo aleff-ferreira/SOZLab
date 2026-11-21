@@ -161,7 +161,7 @@ input events at 1366×768 and fails when a control is not visible, not labelled,
 
 All 10 pass; 40 interactive controls audited, 13 icon-only controls, all with tooltips; every statistic tile shows its unit; no clipped labels
 detected. 25 pytest-qt tests cover the same paths, cancellation (clean cancel and labelled partial result), a stale-results marker, the GUI/CLI
-agreement, and layout regressions (no clipped rail, no overlapping tiles at 1080×660 … 1920×1080). 24 screenshots (dark and light, 1100×680, 1366×768,
+agreement, and layout regressions (no clipped left or right rail in any state, no overlapping tiles at 1080×660 … 1920×1080). 24 screenshots (dark and light, 1100×680, 1366×768,
 1920×1080, error states) are in [screens/](screens/): e.g. [results at 1366×768](screens/20_results_1366x768_dark.png),
 [light theme](screens/21_results_light_light.png), [trust panel](screens/10_trust_dark.png), [error recovery](screens/13_error_bad_selection_dark.png).
 

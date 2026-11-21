@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sozlab"
 dynamic = ["version"]
-description = "GUI + CLI for solvent occupancy zone analysis of molecular dynamics trajectories"
+description = "Solvent occupancy zones for molecular dynamics: occupancy, residence time and density maps with uncertainty, trust notes and provenance. Workbench GUI + CLI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "Aleff Ferreira Francisco"}]
-keywords = ["molecular dynamics", "solvent", "occupancy", "residence time", "density", "MDAnalysis", "GROMACS"]
+keywords = ["molecular dynamics", "solvent", "hydration shell", "water", "occupancy", "residence time", "density map", "uncertainty", "reproducibility", "MDAnalysis", "GROMACS", "AMBER", "visualization"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Operating System :: POSIX :: Linux",

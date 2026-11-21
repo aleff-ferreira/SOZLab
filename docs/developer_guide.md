@@ -62,7 +62,14 @@ python bench/validate/tip3p_validation.py && python bench/validate/dt_extrapolat
 python bench/validate/perf_compare.py --label v2.1 --what soz                              # and with PYTHONPATH=.baseline/src
 ```
 
-Results land in `docs/evidence/data/`. Trajectories are not committed; `meta.json` holds their SHA-256 sums.
+The demo video and the README loop are filmed from the real Workbench by a script (offscreen Qt, a virtual pointer, captions; every number and 3D frame is computed live):
+
+```bash
+python bench/media/make_demo_video.py            # needs ffmpeg on PATH; uses bench/out/tip3p (see above), or --system demo for the synthetic system
+python bench/media/make_assets.py                # hero GIF, poster and social-preview image from the rendered video
+```
+
+Results land in `docs/evidence/data/` (evidence) and `docs/media/` (video and images). Trajectories are not committed; `meta.json` holds their SHA-256 sums.
 
 ## Packaging
 

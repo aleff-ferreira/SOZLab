@@ -85,9 +85,9 @@ timeline and see what moved.
 
 ## 5. Export
 
-*Save data* writes CSV tables, a JSON summary, `provenance.json` (software versions, configuration hash, SHA-256 of the
+*Save data only* writes CSV tables, a JSON summary, `provenance.json` (software versions, configuration hash, SHA-256 of the
 input files, the environment), `DATA_DICTIONARY.md` (definitions of every column) and `manifest.json` (SHA-256 of every
-file written). *Save data + report* adds a readable report. *Verify files* re-hashes everything against the manifest.
+file written). *Save data + report* (the main button) adds a readable report. *Verify files* re-hashes everything against the manifest.
 
 *Extract frames* writes the frames where a rule holds (for example "the zone holds at least 2 molecules", at least 5
 consecutive frames, bridging gaps of up to 2) to a new trajectory. Before writing, SOZLab checks that the input files

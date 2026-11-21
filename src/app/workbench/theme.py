@@ -212,6 +212,8 @@ QPushButton[variant="ghost"], QToolButton[variant="ghost"] {{ background: transp
 QPushButton[variant="ghost"]:hover, QToolButton[variant="ghost"]:hover {{ background: {t['bg3']}; color: {t['ink']}; border-color: {t['line']}; }}
 QToolButton[variant="reset"] {{ background: transparent; border: none; color: {t['warn']}; padding: {p(2)}px; }}
 QPushButton[variant="seg"] {{ border-radius: 0; border-right-width: 0; padding: {p(6)}px {p(12)}px; font-weight: 600; }}
+QPushButton[variant="seg"][pos="first"] {{ border-top-left-radius: {p(9)}px; border-bottom-left-radius: {p(9)}px; }}
+QPushButton[variant="seg"][pos="last"] {{ border-top-right-radius: {p(9)}px; border-bottom-right-radius: {p(9)}px; border-right-width: 1px; }}
 QPushButton[variant="seg"][checked="true"] {{ background: {self.rgba('accent', 0.22)}; border-color: {t['accent']}; color: {t['accent_hi'] if self.is_dark else t['accent']}; }}
 
 /* ---- inputs ---- */

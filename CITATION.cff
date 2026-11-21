@@ -11,9 +11,11 @@ url: "https://github.com/aleff-ferreira/SOZLab"
 repository-code: "https://github.com/aleff-ferreira/SOZLab"
 license: MIT
 abstract: >-
-  SOZLab analyses the solvent in user-defined zones of molecular dynamics trajectories: occupancy,
-  entries and exits, residence times with uncertainty, and solute-frame density maps, with
-  provenance-verified frame extraction.
+  SOZLab shows where the solvent is around part of a molecule in molecular dynamics trajectories and measures it:
+  how many molecules are in a zone, how long they stay, how often they exchange, and where the solvent density is
+  enriched. Every number is reported with its unit, an uncertainty and a note on when it can be trusted; every export
+  records the software, settings and input files (SHA-256) that produced it. A Workbench GUI (live 3D zone, live
+  occupancy preview, run comparison) and a CLI share one engine and give identical results.
 keywords:
   - solvent
   - occupancy
@@ -21,3 +23,5 @@ keywords:
   - molecular dynamics
   - MDAnalysis
   - GROMACS
+  - hydration shell
+  - reproducibility
