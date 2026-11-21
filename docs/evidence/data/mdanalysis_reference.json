@@ -1,0 +1,220 @@
+{
+ "data": "MDAnalysisTests adk_oplsaa.gro + adk_oplsaa.xtc",
+ "box_A_deg": [
+  80.01700592041016,
+  80.01700592041016,
+  80.01700592041016,
+  60.0,
+  60.0,
+  90.0
+ ],
+ "cutoffs": [
+  {
+   "cutoff_A": 3.0,
+   "molecules_in_zone_total": 6497,
+   "mismatching_molecules": 0,
+   "frames_with_difference": 0,
+   "per_frame": [
+    {
+     "frame": 0,
+     "mdanalysis": 632,
+     "sozlab": 632,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 1,
+     "mdanalysis": 647,
+     "sozlab": 647,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 2,
+     "mdanalysis": 652,
+     "sozlab": 652,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 3,
+     "mdanalysis": 666,
+     "sozlab": 666,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 4,
+     "mdanalysis": 647,
+     "sozlab": 647,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 5,
+     "mdanalysis": 656,
+     "sozlab": 656,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 6,
+     "mdanalysis": 651,
+     "sozlab": 651,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 7,
+     "mdanalysis": 652,
+     "sozlab": 652,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 8,
+     "mdanalysis": 649,
+     "sozlab": 649,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 9,
+     "mdanalysis": 645,
+     "sozlab": 645,
+     "symmetric_difference": 0
+    }
+   ]
+  },
+  {
+   "cutoff_A": 4.0,
+   "molecules_in_zone_total": 10646,
+   "mismatching_molecules": 0,
+   "frames_with_difference": 0,
+   "per_frame": [
+    {
+     "frame": 0,
+     "mdanalysis": 1029,
+     "sozlab": 1029,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 1,
+     "mdanalysis": 1072,
+     "sozlab": 1072,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 2,
+     "mdanalysis": 1072,
+     "sozlab": 1072,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 3,
+     "mdanalysis": 1064,
+     "sozlab": 1064,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 4,
+     "mdanalysis": 1067,
+     "sozlab": 1067,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 5,
+     "mdanalysis": 1059,
+     "sozlab": 1059,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 6,
+     "mdanalysis": 1088,
+     "sozlab": 1088,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 7,
+     "mdanalysis": 1071,
+     "sozlab": 1071,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 8,
+     "mdanalysis": 1068,
+     "sozlab": 1068,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 9,
+     "mdanalysis": 1056,
+     "sozlab": 1056,
+     "symmetric_difference": 0
+    }
+   ]
+  },
+  {
+   "cutoff_A": 6.0,
+   "molecules_in_zone_total": 18664,
+   "mismatching_molecules": 0,
+   "frames_with_difference": 0,
+   "per_frame": [
+    {
+     "frame": 0,
+     "mdanalysis": 1832,
+     "sozlab": 1832,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 1,
+     "mdanalysis": 1879,
+     "sozlab": 1879,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 2,
+     "mdanalysis": 1887,
+     "sozlab": 1887,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 3,
+     "mdanalysis": 1889,
+     "sozlab": 1889,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 4,
+     "mdanalysis": 1890,
+     "sozlab": 1890,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 5,
+     "mdanalysis": 1856,
+     "sozlab": 1856,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 6,
+     "mdanalysis": 1857,
+     "sozlab": 1857,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 7,
+     "mdanalysis": 1896,
+     "sozlab": 1896,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 8,
+     "mdanalysis": 1835,
+     "sozlab": 1835,
+     "symmetric_difference": 0
+    },
+    {
+     "frame": 9,
+     "mdanalysis": 1843,
+     "sozlab": 1843,
+     "symmetric_difference": 0
+    }
+   ]
+  }
+ ],
+ "atoms": 47681,
+ "frames": 10,
+ "dt_ps": 100.00000762939453
+}

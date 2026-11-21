@@ -1,0 +1,11 @@
+{"label": "v2.0.0", "version": "?", "what": "soz", "workers": 1, "stride": 1, "seconds": 4.17, "peak_memory_mb": 179.4, "memory_before_run_mb": 113.7, "frames": 0, "mean_n_solvent": 29.2864}
+{"label": "v2.1.0", "version": "2.1.0", "what": "soz", "workers": 1, "stride": 1, "seconds": 5.0, "peak_memory_mb": 228.0, "memory_before_run_mb": 145.4, "frames": 10000, "mean_n_solvent": 29.2864}
+{"label": "v2.0.0", "version": "?", "what": "soz", "workers": 1, "stride": 1, "seconds": 4.57, "peak_memory_mb": 179.5, "memory_before_run_mb": 114.8, "frames": 0, "mean_n_solvent": 29.2864}
+{"label": "v2.1.0", "version": "2.1.0", "what": "soz", "workers": 1, "stride": 1, "seconds": 5.79, "peak_memory_mb": 228.2, "memory_before_run_mb": 146.4, "frames": 10000, "mean_n_solvent": 29.2864}
+{"label": "v2.0.0", "version": "?", "what": "soz", "workers": 1, "stride": 1, "seconds": 4.27, "peak_memory_mb": 179.6, "memory_before_run_mb": 113.4, "frames": 0, "mean_n_solvent": 29.2864}
+{"label": "v2.1.0", "version": "2.1.0", "what": "soz", "workers": 1, "stride": 1, "seconds": 5.44, "peak_memory_mb": 227.7, "memory_before_run_mb": 145.4, "frames": 10000, "mean_n_solvent": 29.2864}
+{"label": "v2.1.0", "version": "2.1.0", "what": "soz", "workers": 4, "stride": 1, "seconds": 5.05, "peak_memory_mb": 228.4, "memory_before_run_mb": 145.7, "frames": 10000, "mean_n_solvent": 29.2864}
+{"label": "v2.1.0", "version": "2.1.0", "what": "density", "workers": 1, "stride": 1, "seconds": 6.43, "peak_memory_mb": 218.5, "memory_before_run_mb": 192.9, "frames": 10000}
+{"label": "v2.0.0", "version": "?", "what": "soz", "workers": 1, "stride": 1, "seconds": 4.19, "peak_memory_mb": 179.4, "memory_before_run_mb": 113.1, "frames": 10000, "equal_work": true, "mean_n_solvent": 29.2864}
+{"label": "v2.1.0", "version": "2.1.0", "what": "soz", "workers": 1, "stride": 1, "seconds": 4.21, "peak_memory_mb": 224.7, "memory_before_run_mb": 146.0, "frames": 10000, "equal_work": true, "mean_n_solvent": 29.2864}
+{"label": "v2.0.0", "version": "?", "what": "density", "workers": 1, "stride": 1, "seconds": 39.24, "peak_memory_mb": 542.4, "memory_before_run_mb": 161.5, "frames": 0, "equal_work": false}

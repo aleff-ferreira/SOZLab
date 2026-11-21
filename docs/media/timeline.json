@@ -1,0 +1,23 @@
+{
+  "fps": 30,
+  "size": [
+    1600,
+    900
+  ],
+  "seconds": 58.93333333333333,
+  "marks": {
+    "title": 0.0,
+    "import": 2.3,
+    "define": 8.73,
+    "drag": 13.43,
+    "drag_end": 21.9,
+    "run": 22.2,
+    "watch": 29.87,
+    "watch_end": 37.43,
+    "trust": 38.23,
+    "export": 46.6,
+    "end": 54.73,
+    "done": 58.93
+  },
+  "system": "tip3p"
+}

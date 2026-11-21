@@ -1,0 +1,155 @@
+{
+  "r_c_A": 3.2,
+  "frame_interval_ps": 0.02,
+  "frames": 20000,
+  "direct": [
+    {
+      "stride": 1,
+      "dt_ps": 0.02,
+      "tau_ps": 12.245831649077232,
+      "tau_se_ps": 0.8609600954242366,
+      "entry_rate_per_ps": 4.605230261507929,
+      "internal_extrapolation_ps": 11.359088197175344
+    },
+    {
+      "stride": 2,
+      "dt_ps": 0.04,
+      "tau_ps": 12.567290881023144,
+      "tau_se_ps": 0.7777786475158328,
+      "entry_rate_per_ps": 4.262926175528024,
+      "internal_extrapolation_ps": 10.61047376996591
+    },
+    {
+      "stride": 4,
+      "dt_ps": 0.08,
+      "tau_ps": 13.113586750945865,
+      "tau_se_ps": 0.8480704825861037,
+      "entry_rate_per_ps": 3.623224622806104,
+      "internal_extrapolation_ps": 9.317228090266326
+    },
+    {
+      "stride": 8,
+      "dt_ps": 0.16,
+      "tau_ps": 14.414654412380829,
+      "tau_se_ps": 0.7513314638194517,
+      "entry_rate_per_ps": 2.888655568009702,
+      "internal_extrapolation_ps": 9.30069258131219
+    },
+    {
+      "stride": 16,
+      "dt_ps": 0.32,
+      "tau_ps": 16.797428213661988,
+      "tau_se_ps": 1.1774078674803028,
+      "entry_rate_per_ps": 2.2267813571272392,
+      "internal_extrapolation_ps": 11.226705625435342
+    },
+    {
+      "stride": 32,
+      "dt_ps": 0.64,
+      "tau_ps": 19.63809112975804,
+      "tau_se_ps": 1.9664809369774954,
+      "entry_rate_per_ps": 1.6927083126353817,
+      "internal_extrapolation_ps": 15.730279875321527
+    },
+    {
+      "stride": 64,
+      "dt_ps": 1.28,
+      "tau_ps": 22.58900701616253,
+      "tau_se_ps": 2.6313954046867716,
+      "entry_rate_per_ps": 1.3997395662177194,
+      "internal_extrapolation_ps": 20.073059942725465
+    }
+  ],
+  "fine_fit_sqrt_dt": {
+    "intercept_ps": 10.930819541081865,
+    "slope_ps_per_sqrt_ps": 8.413929368758714,
+    "points": 4
+  },
+  "tau_at_finest_dt_ps": 12.245831649077232,
+  "extrapolation_tests": [
+    {
+      "base_dt_ps": 0.02,
+      "uses_dt_ps": [
+        0.02,
+        0.04,
+        0.08
+      ],
+      "extrapolated_tau0_ps": 11.359088197175344,
+      "relative_to_finest_direct": -0.07241186040383851,
+      "relative_to_fine_fit_intercept": 0.039179921915634575,
+      "direct_tau_at_base_dt_relative_to_finest": 0.0
+    },
+    {
+      "base_dt_ps": 0.04,
+      "uses_dt_ps": [
+        0.04,
+        0.08,
+        0.16
+      ],
+      "extrapolated_tau0_ps": 10.61047376996591,
+      "relative_to_finest_direct": -0.13354404388162167,
+      "relative_to_fine_fit_intercept": -0.029306656276959164,
+      "direct_tau_at_base_dt_relative_to_finest": 0.02625050230623871
+    },
+    {
+      "base_dt_ps": 0.08,
+      "uses_dt_ps": [
+        0.08,
+        0.16,
+        0.32
+      ],
+      "extrapolated_tau0_ps": 9.317228090266326,
+      "relative_to_finest_direct": -0.23915105504750156,
+      "relative_to_fine_fit_intercept": -0.147618524370574,
+      "direct_tau_at_base_dt_relative_to_finest": 0.07086126338622512
+    },
+    {
+      "base_dt_ps": 0.16,
+      "uses_dt_ps": [
+        0.16,
+        0.32,
+        0.64
+      ],
+      "extrapolated_tau0_ps": 9.30069258131219,
+      "relative_to_finest_direct": -0.24050135198347022,
+      "relative_to_fine_fit_intercept": -0.1491312662918901,
+      "direct_tau_at_base_dt_relative_to_finest": 0.1771070210218859
+    },
+    {
+      "base_dt_ps": 0.32,
+      "uses_dt_ps": [
+        0.32,
+        0.64,
+        1.28
+      ],
+      "extrapolated_tau0_ps": 11.226705625435342,
+      "relative_to_finest_direct": -0.08322227945365268,
+      "relative_to_fine_fit_intercept": 0.0270689753171236,
+      "direct_tau_at_base_dt_relative_to_finest": 0.3716853779324767
+    },
+    {
+      "base_dt_ps": 0.64,
+      "uses_dt_ps": [
+        0.64,
+        1.28,
+        2.56
+      ],
+      "extrapolated_tau0_ps": 15.730279875321527,
+      "relative_to_finest_direct": 0.28454157513318923,
+      "relative_to_fine_fit_intercept": 0.4390759829307951,
+      "direct_tau_at_base_dt_relative_to_finest": 0.6036551614065215
+    },
+    {
+      "base_dt_ps": 1.28,
+      "uses_dt_ps": [
+        1.28,
+        2.56,
+        5.12
+      ],
+      "extrapolated_tau0_ps": 20.073059942725465,
+      "relative_to_finest_direct": 0.639174906037357,
+      "relative_to_fine_fit_intercept": 0.8363728233993657,
+      "direct_tau_at_base_dt_relative_to_finest": 0.8446282509415923
+    }
+  ]
+}

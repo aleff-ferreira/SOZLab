@@ -38,3 +38,15 @@ test_output.txt
 core
 core.*
 .DS_Store
+
+# SOZLab 2.1 working files
+.venv_install.log
+.baseline/
+bench/out/
+.*_offsets.npz
+.*_offsets.lock
+.sozlab_extract_*/
+
+# Generated example data (python examples/make_demo_data.py)
+examples/data/
+demo_results/

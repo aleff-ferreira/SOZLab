@@ -1,0 +1,169 @@
+{
+  "window_size": [
+    1366,
+    768
+  ],
+  "tasks": [
+    {
+      "task": "T1 Import",
+      "goal": "Open a topology and trajectory",
+      "completed": true,
+      "detail": "2114 atoms, 160 frames, solvent ['SOL']",
+      "actions": 1,
+      "clicks": 0,
+      "keystrokes": 0,
+      "scrolls": 0,
+      "seconds_machine": 0.6,
+      "problems": []
+    },
+    {
+      "task": "T2 Define and tweak the zone",
+      "goal": "Choose what the zone surrounds and change its distance",
+      "completed": true,
+      "detail": "zone: solvent within 4.5 \u00c5 of [resname LIG]; preview mean n 26.26",
+      "actions": 2,
+      "clicks": 1,
+      "keystrokes": 3,
+      "scrolls": 0,
+      "seconds_machine": 1.0,
+      "problems": []
+    },
+    {
+      "task": "T3 Find and change an advanced setting",
+      "goal": "Adjust, compare with default, reset",
+      "completed": true,
+      "detail": "advanced settings open, a changed setting is marked and can be reset",
+      "actions": 5,
+      "clicks": 2,
+      "keystrokes": 1,
+      "scrolls": 2,
+      "seconds_machine": 0.5,
+      "problems": []
+    },
+    {
+      "task": "T4 Run",
+      "goal": "Run the analysis",
+      "completed": true,
+      "detail": "complete=True",
+      "actions": 1,
+      "clicks": 1,
+      "keystrokes": 0,
+      "scrolls": 0,
+      "seconds_machine": 2.7,
+      "problems": []
+    },
+    {
+      "task": "T5 Inspect",
+      "goal": "Find the residence time with its uncertainty, learn what it means, see the caveats",
+      "completed": true,
+      "detail": "residence \u03c4 read as '6.64 ps \u00b1 0.462 (SE)'",
+      "actions": 7,
+      "clicks": 7,
+      "keystrokes": 0,
+      "scrolls": 0,
+      "seconds_machine": 2.8,
+      "problems": []
+    },
+    {
+      "task": "T6 Change a setting and compare",
+      "goal": "See what a different distance does",
+      "completed": true,
+      "detail": "2 runs; overlay shown: True",
+      "actions": 4,
+      "clicks": 3,
+      "keystrokes": 3,
+      "scrolls": 0,
+      "seconds_machine": 1.7,
+      "problems": []
+    },
+    {
+      "task": "T7 Export",
+      "goal": "Save results and check them",
+      "completed": true,
+      "detail": "data + report written and verified against the manifest",
+      "actions": 3,
+      "clicks": 3,
+      "keystrokes": 0,
+      "scrolls": 0,
+      "seconds_machine": 2.3,
+      "problems": []
+    },
+    {
+      "task": "R1 Recover: selection matches nothing",
+      "goal": "Notice, understand and fix",
+      "completed": true,
+      "detail": "Run blocked with the reason shown; one click on a chip recovers",
+      "actions": 2,
+      "clicks": 1,
+      "keystrokes": 0,
+      "scrolls": 1,
+      "seconds_machine": 0.7,
+      "problems": []
+    },
+    {
+      "task": "R2 Recover: wrong solvent name",
+      "goal": "Notice and fix with one click",
+      "completed": true,
+      "detail": "offered 'Use SOL' as a button",
+      "actions": 1,
+      "clicks": 1,
+      "keystrokes": 0,
+      "scrolls": 0,
+      "seconds_machine": 0.8,
+      "problems": []
+    },
+    {
+      "task": "R3 Recover: unreadable file",
+      "goal": "Understand the error and continue",
+      "completed": true,
+      "detail": "Could not read broken.gro: the file is empty, truncated or not a valid .gro file. Supported topologies: .gro .pdb .psf .prmtop/.parm7 .tpr .",
+      "actions": 0,
+      "clicks": 0,
+      "keystrokes": 0,
+      "scrolls": 0,
+      "seconds_machine": 0.4,
+      "problems": []
+    }
+  ],
+  "audit": {
+    "controls_checked": 40,
+    "icon_only_controls": 13,
+    "icon_only_without_tooltip": 0,
+    "tiles_and_units": {
+      "In zone": "molecules",
+      "Occupied": "% of frames",
+      "Residence \u03c4": "ps",
+      "Entry rate": "per ps"
+    },
+    "tiles_without_unit": [],
+    "possibly_clipped_labels": []
+  },
+  "screenshots": [
+    "01_empty_dark.png",
+    "02_imported_dark.png",
+    "03_define_preview_dark.png",
+    "04_cutoff_changed_dark.png",
+    "05_advanced_changed_dark.png",
+    "06_running_dark.png",
+    "07_results_occupancy_dark.png",
+    "08_results_residence_dark.png",
+    "08_results_entries_dark.png",
+    "08_results_sampling_dark.png",
+    "08_results_density_dark.png",
+    "08_results_tables_dark.png",
+    "09_definition_popup_dark.png",
+    "10_trust_dark.png",
+    "11_runs_compare_dark.png",
+    "12_export_dark.png",
+    "13_error_bad_selection_dark.png",
+    "14_error_solvent_name_dark.png",
+    "15_error_unreadable_file_dark.png",
+    "20_results_1366x768_dark.png",
+    "21_results_light_light.png",
+    "22_density_light_light.png",
+    "23_small_1100x680_dark.png",
+    "23_large_1920x1080_dark.png"
+  ],
+  "problems": [],
+  "note": "scripted checks on real widgets with real input events; no human participants"
+}

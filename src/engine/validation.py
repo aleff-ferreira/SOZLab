@@ -147,6 +147,9 @@ def evaluate_node_slow(node: SOZNode, context: EvaluationContext) -> set[int]:
         cutoffs_ang = [to_internal_length(float(value), unit) for value in cutoffs]
         mode = resolve_probe_mode(atom_mode, context.solvent.probe.position)
         seed = context.selections[seed_label].group
+        if str(node.params.get("mode", "chained")).lower() == "radial":
+            solvent_pos, atom_map = solvent_positions(context.solvent, mode)
+            return _distance_resindices_slow(seed.positions, solvent_pos, atom_map, max(cutoffs_ang), context.pbc_box)
         shell_sets: list[set[int]] = []
         current_seed_positions = seed.positions
         for cutoff_ang in cutoffs_ang:

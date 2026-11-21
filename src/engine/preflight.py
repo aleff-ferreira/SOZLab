@@ -19,7 +19,9 @@ from engine.models import (
     DensityMapConfig,
     WaterDynamicsConfig,
 )
-from engine.solvent import build_solvent, resolve_probe_mode
+from engine.periodic import box_from_dimensions, cutoff_warning
+from engine.solvent import build_solvent, detect_solvent_species, integrity_report, resolve_probe_mode
+from engine.soz_eval import max_cutoff_angstrom, validate_node
 from engine.units import to_internal_length
 from engine.resolver import sanitize_selection_string
 
@@ -464,8 +466,15 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
         if count > 0:
             solvent_matches.append(name)
 
+    detected = []
+    try:
+        detected = detect_solvent_species(universe)
+    except Exception:
+        detected = []
     if not solvent_matches:
-        errors.append("Solvent resnames did not match any residues.")
+        water_like = [f"{d['resname']} ({d['n_residues']})" for d in detected if d["kind"] == "water"]
+        hint = f" Water-like residues in this topology: {', '.join(water_like)}." if water_like else ""
+        errors.append("Solvent resnames did not match any residues." + hint)
 
     ion_matches = []
     ion_counts = {}
@@ -501,6 +510,7 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
             "Probe selection derived from legacy water_oxygen_names; review probe settings for non-water solvents."
         )
 
+    solvent = None
     try:
         resolve_probe_mode("probe", solvent_cfg.probe.position)
         solvent = build_solvent(universe, solvent_cfg)
@@ -544,6 +554,8 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
         "ion_matches": ion_matches,
         "include_ions": solvent_cfg.include_ions,
         "resnames_present": resnames_present[:50],
+        "detected_species": detected[:20],
+        "notes": list(solvent.notes) if solvent is not None else [],
     }
 
     # Unit sanity
@@ -581,56 +593,24 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
         _check_node_units(soz.root, errors)
         _check_node_modes(soz.root, errors)
 
-    for cfg in project.hbond_hydration:
-        if cfg.conditioning not in ("soz", "all"):
-            errors.append(
-                f"H-bond hydration '{cfg.name}' conditioning must be 'soz' or 'all'."
-            )
-        sel_check = _check_selection_string(
-            universe, cfg.residue_selection, f"hbond_hydration:{cfg.name}"
-        )
-        if sel_check.count == 0:
-            warnings.append(
-                f"H-bond hydration '{cfg.name}' residue_selection resolved to 0 atoms."
-            )
-            if sel_check.suggestions:
-                warnings.append("  Suggestions: " + " | ".join(sel_check.suggestions[:3]))
-        if cfg.water_selection:
-            sel_check = _check_selection_string(
-                universe, cfg.water_selection, f"hbond_hydration:{cfg.name}:water"
-            )
-            if sel_check.count == 0:
-                warnings.append(
-                    f"H-bond hydration '{cfg.name}' water_selection resolved to 0 atoms."
-                )
-                if sel_check.suggestions:
-                    warnings.append("  Suggestions: " + " | ".join(sel_check.suggestions[:3]))
-        for label, sel in [
-            ("donors", cfg.donors_selection),
-            ("hydrogens", cfg.hydrogens_selection),
-            ("acceptors", cfg.acceptors_selection),
-        ]:
-            if sel:
-                sel_check = _check_selection_string(
-                    universe, sel, f"hbond_hydration:{cfg.name}:{label}"
-                )
-                if sel_check.count == 0:
-                    warnings.append(
-                        f"H-bond hydration '{cfg.name}' {label}_selection resolved to 0 atoms."
-                    )
-                    if sel_check.suggestions:
-                        warnings.append(
-                            "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
-                        )
-
     for cfg in project.density_maps:
         policy = getattr(cfg, "conditioning_policy", "strict")
         if cfg.grid_spacing <= 0:
             errors.append(
                 f"Density map '{cfg.name}' grid_spacing must be positive."
             )
-        if cfg.stride <= 0:
+        if cfg.stride is not None and cfg.stride <= 0:
             errors.append(f"Density map '{cfg.name}' stride must be positive.")
+        if (cfg.engine or "solute").lower() not in ("solute", "mdanalysis"):
+            errors.append(f"Density map '{cfg.name}' engine must be 'solute' or 'mdanalysis'.")
+        if cfg.region_padding < 0:
+            errors.append(f"Density map '{cfg.name}' region_padding must be >= 0.")
+        if cfg.bulk_method not in ("auto", "box", "far_field", "user"):
+            errors.append(f"Density map '{cfg.name}' bulk_method must be auto, box, far_field or user.")
+        if cfg.bulk_method == "user" and not cfg.bulk_density:
+            errors.append(f"Density map '{cfg.name}' bulk_method 'user' needs bulk_density (A^-3).")
+        if cfg.n_blocks < 2:
+            errors.append(f"Density map '{cfg.name}' n_blocks must be at least 2.")
         density_issue = density_conditioning_issue(cfg)
         if density_issue is not None:
             # Fail fast in Project Doctor / CLI validate so a strict density run cannot
@@ -695,75 +675,10 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
                         "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
                     )
 
-    for cfg in project.water_dynamics:
-        if cfg.region_mode not in ("soz", "selection"):
-            errors.append(
-                f"Water dynamics '{cfg.name}' region_mode must be 'soz' or 'selection'."
-            )
-        if cfg.region_mode == "soz" and cfg.soz_name:
-            soz_names = {soz.name for soz in project.sozs}
-            if cfg.soz_name not in soz_names:
-                errors.append(
-                    f"Water dynamics '{cfg.name}' soz_name '{cfg.soz_name}' not found."
-                )
-        if cfg.region_mode == "selection":
-            if not cfg.region_selection:
-                errors.append(
-                    f"Water dynamics '{cfg.name}' region_selection required for selection mode."
-                )
-            else:
-                sel_check = _check_selection_string(
-                    universe, cfg.region_selection, f"water_dynamics:{cfg.name}:region"
-                )
-                if sel_check.count == 0:
-                    warnings.append(
-                        f"Water dynamics '{cfg.name}' region_selection resolved to 0 atoms."
-                    )
-                    if sel_check.suggestions:
-                        warnings.append(
-                            "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
-                        )
-            try:
-                resolve_probe_mode(cfg.region_probe_mode, project.solvent.probe.position)
-            except Exception as exc:
-                errors.append(
-                    f"Unsupported probe mode '{cfg.region_probe_mode}' in water dynamics '{cfg.name}': {exc}"
-                )
-            try:
-                to_internal_length(1.0, cfg.region_unit)
-            except Exception:
-                errors.append(
-                    f"Unsupported unit '{cfg.region_unit}' in water dynamics '{cfg.name}'."
-                )
-        if cfg.residence_mode not in ("continuous", "intermittent"):
-            errors.append(
-                f"Water dynamics '{cfg.name}' residence_mode must be 'continuous' or 'intermittent'."
-            )
-        if cfg.solute_selection:
-            sel_check = _check_selection_string(
-                universe, cfg.solute_selection, f"water_dynamics:{cfg.name}:solute"
-            )
-            if sel_check.count == 0:
-                warnings.append(
-                    f"Water dynamics '{cfg.name}' solute_selection resolved to 0 atoms."
-                )
-                if sel_check.suggestions:
-                    warnings.append(
-                        "  Suggestions: " + " | ".join(sel_check.suggestions[:3])
-                    )
-
     required_modes: set[str] = set()
     for soz in project.sozs:
         _collect_node_modes(soz.root, required_modes)
 
-    for cfg in project.water_dynamics:
-        if cfg.region_mode == "selection":
-            try:
-                required_modes.add(
-                    resolve_probe_mode(cfg.region_probe_mode, project.solvent.probe.position)
-                )
-            except Exception:
-                pass
     if "com" in required_modes:
         try:
             _ = universe.atoms.masses
@@ -808,12 +723,59 @@ def run_preflight(project: ProjectConfig, universe: mda.Universe) -> PreflightRe
             "SOZ references missing selections: " + ", ".join(missing_labels)
         )
 
+    # SOZ definition sanity: unknown parameters, silent defaults, undefined selections
+    selection_labels = set(project.selections.keys())
+    for soz in project.sozs:
+        node_errors, node_warnings = validate_node(soz.root, selection_labels, path=soz.name)
+        errors.extend(node_errors)
+        warnings.extend(node_warnings)
+
+    # Geometric selections are evaluated once (frame 0) unless marked updating.
+    _geometric = re.compile(r"(around|sphzone|sphlayer|cylzone|cylayer|point|prop)", re.IGNORECASE)
+    for label, spec in project.selections.items():
+        if spec.selection and not spec.updating and _geometric.search(spec.selection):
+            warnings.append(
+                f"Selection '{label}' uses a geometric keyword and is evaluated ONCE at frame 0; it is not updated as "
+                "the trajectory advances. Set 'updating': true on the selection to re-evaluate every frame."
+            )
+
     # PBC sanity
     dims = universe.trajectory.ts.dimensions if len(universe.trajectory) else None
     has_box = bool(dims is not None and np.all(np.array(dims[:3]) > 0))
     if not has_box:
         warnings.append("No valid box vectors found; PBC distances may be unreliable.")
     pbc_summary = {"has_box": has_box, "dimensions": dims.tolist() if dims is not None else None}
+    box0 = box_from_dimensions(dims) if len(universe.trajectory) else None
+    pbc_summary["min_image_limit"] = float(box0.min_image_limit) if box0 is not None else None
+    pbc_summary["orthorhombic"] = bool(box0.orthorhombic) if box0 is not None else None
+    for soz in project.sozs:
+        msg = cutoff_warning(max_cutoff_angstrom(soz.root), box0, what=f"SOZ '{soz.name}' largest cut-off")
+        if msg:
+            warnings.append(msg)
+
+    # Is every solvent molecule geometrically intact in frame 0? (identity check: wrong atom
+    # order, or molecules larger than half the box, show up as huge intramolecular extents)
+    try:
+        if solvent is not None and len(universe.trajectory):
+            universe.trajectory[0]
+            integ = integrity_report(solvent, universe.trajectory.ts.positions, box0)
+            pbc_summary["solvent_integrity"] = integ
+            for rname, info in (integ.get("atom_count_outliers") or {}).items():
+                warnings.append(
+                    f"{info['n_outliers']} '{rname}' residue(s) have a different number of atoms than the usual "
+                    f"{info['expected_atoms']} (e.g. {', '.join(info['examples'])}): consecutive molecules sharing a "
+                    "residue number and name are merged into one residue by GRO/PDB parsers, which silently "
+                    "corrupts counts and identities. Renumber the solvent residues."
+                )
+            if integ["n_checked"] and integ["n_broken"]:
+                frac = integ["n_broken"] / integ["n_checked"]
+                msg = (f"{integ['n_broken']} of {integ['n_checked']} solvent molecules are not geometrically intact in "
+                       f"frame 0 (largest intramolecular extent {integ['max_extent']:.1f} A, e.g. {', '.join(integ['examples'][:3])}). "
+                       "Either the topology and trajectory do not describe the same atoms in the same order, or the file "
+                       "parser merged consecutive molecules that share a residue number and name into one residue.")
+                (errors if frac > 0.05 else warnings).append(msg)
+    except Exception as exc:  # never let a QC probe break a run
+        logger.debug("solvent integrity check skipped: %s", exc)
 
     # GROMACS availability
     try:

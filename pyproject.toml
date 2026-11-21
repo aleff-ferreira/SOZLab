@@ -4,40 +4,46 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sozlab"
-version = "0.1.1"
-description = "Linux GUI + CLI for GROMACS solvent occupancy zone analysis"
+dynamic = ["version"]
+description = "Solvent occupancy zones for molecular dynamics: occupancy, residence time and density maps with uncertainty, trust notes and provenance. Workbench GUI + CLI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "Aleff Ferreira Francisco"}]
-keywords = ["gromacs", "mdanalysis", "solvent", "occupancy", "soZ"]
+keywords = ["molecular dynamics", "solvent", "hydration shell", "water", "occupancy", "residence time", "density map", "uncertainty", "reproducibility", "MDAnalysis", "GROMACS", "AMBER", "visualization"]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "Operating System :: POSIX :: Linux"
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
+  "Topic :: Scientific/Engineering :: Chemistry",
 ]
 dependencies = [
   "MDAnalysis==2.9.0",
   "numpy==1.26.4",
+  "scipy>=1.11",
   "pandas==2.2.2",
   "PyQt6>=6.5,<6.8",
-  "PyQt6-WebEngine>=6.5,<6.8",
   "pyqtgraph==0.13.7",
   "matplotlib==3.9.2",
-  "pyyaml==6.0.2",
-  "PyOpenGL>=3.1.0",
-  "scikit-image>=0.21.0"
+  "pyyaml==6.0.2"
 ]
 
 [project.optional-dependencies]
 parquet = ["pyarrow==17.0.0"]
+test = ["pytest>=8", "pytest-timeout", "pytest-qt"]
+validation = ["MDAnalysisTests==2.9.0", "openmm>=8.1", "waterdynamics>=1.2"]
 
 [project.scripts]
 sozlab-gui = "app.main:main"
 sozlab-cli = "cli.sozlab_cli:main"
 
 [tool.setuptools]
-packages = ["app", "engine", "cli"]
+packages = ["app", "app.workbench", "engine", "cli"]
 package-dir = {"app" = "src/app", "engine" = "src/engine", "cli" = "cli"}
+
+[tool.setuptools.dynamic]
+version = {attr = "engine._version.__version__"}
 
 [tool.pytest.ini_options]
 addopts = "-q -m \"not slow\""

@@ -19,6 +19,7 @@ class SelectionSpec:
     chain: Optional[str] = None
     expect_count: Optional[int] = None
     require_unique: bool = False
+    updating: bool = False  # re-evaluate geometric selections (around, sphzone, ...) every frame
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -34,6 +35,7 @@ class SelectionSpec:
             "chain": self.chain,
             "expect_count": self.expect_count,
             "require_unique": self.require_unique,
+            "updating": self.updating,
         }
 
     @classmethod
@@ -51,6 +53,7 @@ class SelectionSpec:
             chain=data.get("chain"),
             expect_count=data.get("expect_count"),
             require_unique=bool(data.get("require_unique", False)),
+            updating=bool(data.get("updating", False)),
         )
 
 
@@ -190,6 +193,12 @@ class AnalysisOptions:
     store_ids: bool = True
     store_min_distances: bool = True
     preview_frames: int = 200
+    # ---- added in 2.1 -------------------------------------------------------------
+    dt_override: Optional[float] = None  # ps per trajectory frame (formats without time stamps)
+    gap_tolerance_time: Optional[float] = None  # ps; overrides gap_tolerance, stride independent
+    uncertainty_blocks: int = 5
+    stride_sensitivity: bool = True
+    parallel_min_seconds: float = 10.0  # estimated serial time below which workers are not started
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -201,6 +210,11 @@ class AnalysisOptions:
             "store_ids": self.store_ids,
             "store_min_distances": self.store_min_distances,
             "preview_frames": self.preview_frames,
+            "dt_override": self.dt_override,
+            "gap_tolerance_time": self.gap_tolerance_time,
+            "uncertainty_blocks": self.uncertainty_blocks,
+            "stride_sensitivity": self.stride_sensitivity,
+            "parallel_min_seconds": self.parallel_min_seconds,
         }
 
     @classmethod
@@ -214,6 +228,11 @@ class AnalysisOptions:
             store_ids=bool(data.get("store_ids", True)),
             store_min_distances=bool(data.get("store_min_distances", True)),
             preview_frames=int(data.get("preview_frames", 200)),
+            dt_override=None if data.get("dt_override") is None else float(data["dt_override"]),
+            gap_tolerance_time=None if data.get("gap_tolerance_time") is None else float(data["gap_tolerance_time"]),
+            uncertainty_blocks=int(data.get("uncertainty_blocks", 5)),
+            stride_sensitivity=bool(data.get("stride_sensitivity", True)),
+            parallel_min_seconds=float(data.get("parallel_min_seconds", 10.0)),
         )
 
 
@@ -268,11 +287,20 @@ class HbondHydrationConfig:
 
 @dataclass
 class DensityMapConfig:
+    """Time-averaged solvent number-density map in a solute-fixed frame.
+
+    ``engine="solute"`` (default, algorithm 2) wraps solvent about the solute, superposes
+    every frame on a reference and accumulates counts on a grid defined by the solute, with
+    block-based uncertainty and bulk normalisation. ``engine="mdanalysis"`` reproduces the
+    v2.0.0 behaviour (``MDAnalysis.analysis.density.DensityAnalysis``) for comparison.
+    ``stride``/``frame_start``/``frame_stop`` of ``None`` inherit the analysis window.
+    """
+
     name: str
     species_selection: str
     grid_spacing: float = 1.0
-    padding: float = 2.0
-    stride: int = 1
+    padding: float = 2.0  # legacy engine only
+    stride: Optional[int] = None
     frame_start: Optional[int] = None
     frame_stop: Optional[int] = None
     align: bool = False
@@ -282,6 +310,16 @@ class DensityMapConfig:
     output_format: str = "dx"
     view_mode: str = "physical"
     conditioning_policy: str = "strict"
+    # ---- added in 2.1 -------------------------------------------------------------
+    engine: str = "solute"
+    region_selection: Optional[str] = None  # defaults to align_selection
+    region_padding: float = 12.0  # A beyond the region selection's extent
+    grid_center: Optional[List[float]] = None  # A; defaults to the reference solute centre
+    grid_size: Optional[List[float]] = None  # A edge lengths; overrides region/padding
+    bulk_density: Optional[float] = None  # A^-3 override
+    bulk_method: str = "auto"  # auto | box | far_field | user
+    far_field_distance: float = 8.0  # A from the region atoms
+    n_blocks: int = 5
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -299,16 +337,30 @@ class DensityMapConfig:
             "output_format": self.output_format,
             "view_mode": self.view_mode,
             "conditioning_policy": self.conditioning_policy,
+            "engine": self.engine,
+            "region_selection": self.region_selection,
+            "region_padding": self.region_padding,
+            "grid_center": self.grid_center,
+            "grid_size": self.grid_size,
+            "bulk_density": self.bulk_density,
+            "bulk_method": self.bulk_method,
+            "far_field_distance": self.far_field_distance,
+            "n_blocks": self.n_blocks,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DensityMapConfig":
+        def _opt_float(key):
+            value = data.get(key)
+            return None if value is None else float(value)
+
+        stride = data.get("stride")
         return cls(
             name=data.get("name", "density_map"),
             species_selection=data.get("species_selection", data.get("selection", "")),
             grid_spacing=float(data.get("grid_spacing", data.get("delta", 1.0))),
             padding=float(data.get("padding", 2.0)),
-            stride=int(data.get("stride", 1)),
+            stride=None if stride is None else int(stride),
             frame_start=data.get("frame_start"),
             frame_stop=data.get("frame_stop"),
             align=bool(data.get("align", False)),
@@ -318,6 +370,15 @@ class DensityMapConfig:
             output_format=data.get("output_format", "dx"),
             view_mode=data.get("view_mode", "physical"),
             conditioning_policy=data.get("conditioning_policy", "strict"),
+            engine=str(data.get("engine", "solute")),
+            region_selection=data.get("region_selection"),
+            region_padding=float(data.get("region_padding", 12.0)),
+            grid_center=None if data.get("grid_center") is None else [float(v) for v in data["grid_center"]],
+            grid_size=None if data.get("grid_size") is None else [float(v) for v in data["grid_size"]],
+            bulk_density=_opt_float("bulk_density"),
+            bulk_method=str(data.get("bulk_method", "auto")),
+            far_field_distance=float(data.get("far_field_distance", 8.0)),
+            n_blocks=int(data.get("n_blocks", 5)),
         )
 
     @property

@@ -1,0 +1,213 @@
+{
+  "system": {
+    "openmm": "8.6.1.dev-b399af4",
+    "platform": "OpenCL",
+    "seed": 20241120,
+    "box_nm": 3.174701104679925,
+    "n_atoms": 3202,
+    "n_water": 1064,
+    "n_na": 5,
+    "n_cl": 5,
+    "temperature_K": 300,
+    "frame_interval_ps": 0.2,
+    "production_ns_per_replica": 2.0,
+    "water_number_density_A3": 0.03325317352595348
+  },
+  "replica_sha256": {
+    "rep0.xtc": "28d57786be865ba61a415a1abd6dc731971ec1e432796629239af9ec4368b349",
+    "rep1.xtc": "0ecb3e3d7ce61dea24fce51aba2cb900c47004f72d488cb441c54a5f321461f7",
+    "rep2.xtc": "1543de5cdd0b46bf3976c879a3f03e4d89ada2fdfc12d0ec8e196c4df7e13209",
+    "rep3.xtc": "ecd28f355816090fea2c545015fa41fd8b5cb4bc7505388ceb3b62c6c38c52fe"
+  },
+  "rdf": {
+    "first_peak_A": 2.355,
+    "r_c_A": 3.2,
+    "coordination_number_at_r_c": 5.862186008875521,
+    "expected_zone_occupancy_5_ions": 29.310930044377606,
+    "bulk_density_N_over_V": 0.033253167099133916
+  },
+  "V1_membership": {
+    "frames_checked": 300,
+    "mismatching_frames": 0,
+    "r_c_A": 3.2
+  },
+  "V2_coordination": {
+    "soz_mean_occupancy_per_replica": [
+      29.2864,
+      29.2582,
+      29.2643,
+      29.2393
+    ],
+    "soz_mean": 29.26205,
+    "soz_replica_sd": 0.019411079310538284,
+    "interrdf_expected": 29.310930044377606,
+    "relative_difference": -0.0016676388058516345
+  },
+  "V3_survival": {
+    "stride_frames": 5,
+    "dt_ps": 1.0000000149011612,
+    "tau_max_lags": 100,
+    "max_abs_diff_vs_bruteforce_pooled": 0.0,
+    "max_abs_diff_vs_bruteforce_mean_of_ratios": 0.0003387833810239993,
+    "max_abs_diff_vs_waterdynamics": 0.0003387833810215568,
+    "integral_0_to_tau_max_ps": {
+      "sozlab": 22.476317020595435,
+      "bruteforce_pooled": 22.476317020595435,
+      "waterdynamics": 22.480001729526926
+    },
+    "note": "SOZLab pools every origin whose lag fits: S(tau) = sum N_tau / sum N_0 (Impey et al. 1983). waterdynamics averages the per-origin ratios N_tau/N_0; both are exact for their definition, they differ by finite-sample weighting"
+  },
+  "V4_uncertainty": {
+    "mean_n_solvent": {
+      "grand_mean": 29.262050000000002,
+      "empirical_sd_across_chunks": 0.09737305582141297,
+      "mean_reported_se": 0.10507691989008996,
+      "ratio_empirical_sd_to_reported_se": 0.9266835754537227,
+      "coverage_95": 0.8125,
+      "n_chunks": 16
+    },
+    "tau_survival_integral": {
+      "grand_mean": 16.625003891963765,
+      "empirical_sd_across_chunks": 0.6104550019193042,
+      "mean_reported_se": 0.8368942170282576,
+      "ratio_empirical_sd_to_reported_se": 0.7294291076439501,
+      "coverage_95": 1.0,
+      "n_chunks": 16
+    },
+    "entry_rate_per_time": {
+      "grand_mean": 2.6452901124738633,
+      "empirical_sd_across_chunks": 0.06819492040818642,
+      "mean_reported_se": 0.07971598544018597,
+      "ratio_empirical_sd_to_reported_se": 0.8554735920483069,
+      "coverage_95": 1.0,
+      "n_chunks": 16
+    }
+  },
+  "V5_stride": [
+    {
+      "stride": 1,
+      "dt_ps": 0.2,
+      "tau_continuous_ps": 16.37932581781348,
+      "tau_continuous_sd": 0.3079367018773593,
+      "tau_intermittent_gap2ps": 27.342682127151456,
+      "tau_intermittent_gap2ps_sd": 0.5364602542194655,
+      "entry_rate_per_ps": 2.645764576461589,
+      "tau_dt0_internal_extrapolation_ps": 11.784834580263242
+    },
+    {
+      "stride": 5,
+      "dt_ps": 1.0,
+      "tau_continuous_ps": 21.864946498247164,
+      "tau_continuous_sd": 0.5037779634277291,
+      "tau_intermittent_gap2ps": 27.616558441509774,
+      "tau_intermittent_gap2ps_sd": 0.5647330386507293,
+      "entry_rate_per_ps": 1.4782391556698606,
+      "tau_dt0_internal_extrapolation_ps": 18.114668562329243
+    },
+    {
+      "stride": 10,
+      "dt_ps": 2.0,
+      "tau_continuous_ps": 24.119832350450984,
+      "tau_continuous_sd": 0.3650154581267415,
+      "tau_intermittent_gap2ps": 27.847022232005827,
+      "tau_intermittent_gap2ps_sd": 0.6663380821815587,
+      "entry_rate_per_ps": 1.2366116418343909,
+      "tau_dt0_internal_extrapolation_ps": 20.861786608796315
+    },
+    {
+      "stride": 25,
+      "dt_ps": 5.0,
+      "tau_continuous_ps": 26.37246028909179,
+      "tau_continuous_sd": 0.6063182773489267,
+      "tau_intermittent_gap2ps": 26.37246028909179,
+      "tau_intermittent_gap2ps_sd": 0.6063182773489267,
+      "entry_rate_per_ps": 1.0269423810259306,
+      "tau_dt0_internal_extrapolation_ps": 22.542689562651375
+    },
+    {
+      "stride": 50,
+      "dt_ps": 10.0,
+      "tau_continuous_ps": 27.90225215074459,
+      "tau_continuous_sd": 0.8484392343249859,
+      "tau_intermittent_gap2ps": 27.90225215074459,
+      "tau_intermittent_gap2ps_sd": 0.8484392343249859,
+      "entry_rate_per_ps": 0.8859296699803643,
+      "tau_dt0_internal_extrapolation_ps": 20.62384501851237
+    }
+  ],
+  "V6_density": {
+    "0.5": {
+      "grid_spacing_A": 0.5,
+      "rms_g_difference_r_ge_3.4A": 0.022790846805136752,
+      "rms_g_difference_r_ge_3.4A_if_masked_before_averaging": 0.03384486422410271,
+      "first_peak_g_map": 4.144542277738113,
+      "first_peak_g_interrdf": 5.743390731502999,
+      "coordination_number_map": 5.8153648,
+      "coordination_number_interrdf": 5.813028755286526,
+      "coordination_relative_difference": 0.00040186360876837135,
+      "reliable_fraction": 0.9774948559670782,
+      "bulk_metadata": {
+        "value": 0.033234068027210885,
+        "method": "far_field",
+        "box_mean": 0.033253167099133944,
+        "far_field": 0.033234068027210885,
+        "far_field_voxels": 29400,
+        "far_vs_box_ratio": 0.9994256465296637,
+        "far_field_distance": 8.0
+      },
+      "bulk_N_over_V": 0.033253167099133916,
+      "trust": [
+        {
+          "level": "warning",
+          "id": "density.unaligned",
+          "scope": "density:na_water",
+          "message": "The map was accumulated without superposition on the solute; solute motion smears it."
+        }
+      ]
+    },
+    "0.25": {
+      "grid_spacing_A": 0.25,
+      "rms_g_difference_r_ge_3.4A": 0.010335433828140415,
+      "rms_g_difference_r_ge_3.4A_if_masked_before_averaging": 1.0771340196916217,
+      "first_peak_g_map": 5.042966189933048,
+      "first_peak_g_interrdf": 5.743390731502999,
+      "coordination_number_map": 5.818528,
+      "coordination_number_interrdf": 5.813028755286526,
+      "coordination_relative_difference": 0.0009460205591573789,
+      "reliable_fraction": 0.035239304698216734,
+      "bulk_metadata": {
+        "value": 0.033233591100257774,
+        "method": "far_field",
+        "box_mean": 0.033253167099133944,
+        "far_field": 0.033233591100257774,
+        "far_field_voxels": 235872,
+        "far_vs_box_ratio": 0.999411304228021,
+        "far_field_distance": 8.0
+      },
+      "bulk_N_over_V": 0.033253167099133916,
+      "trust": [
+        {
+          "level": "warning",
+          "id": "density.unaligned",
+          "scope": "density:na_water",
+          "message": "The map was accumulated without superposition on the solute; solute motion smears it."
+        },
+        {
+          "level": "caution",
+          "id": "density.low_reliability",
+          "scope": "density:na_water",
+          "message": "Only 4% of voxels have a relative standard error below 35%: use more frames, a larger grid spacing or a different region."
+        }
+      ]
+    }
+  },
+  "V7_parallel": {
+    "frames": 10000,
+    "per_frame_identical": true,
+    "seconds_serial": 4.542060375213623,
+    "seconds_workers4": 3.68642258644104,
+    "workers_used": 4,
+    "mode": "parallel"
+  },
+  "wall_seconds_total": 144.41146326065063
+}
