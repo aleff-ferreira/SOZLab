@@ -33,6 +33,14 @@ warnings.filterwarnings("ignore")
 REPO = Path(__file__).resolve().parents[2]
 
 
+def _rel(path: Path) -> str:
+    """Repo-relative (or just the last folders) so published results carry no machine-specific paths."""
+    try:
+        return path.resolve().relative_to(REPO).as_posix()
+    except ValueError:
+        return "/".join(path.parts[-3:])
+
+
 def _load_synthetic():
     spec = importlib.util.spec_from_file_location("sozlab_synthetic", REPO / "src" / "engine" / "synthetic.py")
     mod = importlib.util.module_from_spec(spec)
@@ -435,7 +443,7 @@ def main():
         if r["reproduced"] is None:
             print("      ", r["error"])
     shutil.rmtree(tmp, ignore_errors=True)
-    payload = dict(label=args.label, engine=str(Path(engine.__file__).parent), mdanalysis=mda.__version__,
+    payload = dict(label=args.label, engine=_rel(Path(engine.__file__).parent), mdanalysis=mda.__version__,
                    python=sys.version.split()[0], platform=sys.platform, results=results)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)

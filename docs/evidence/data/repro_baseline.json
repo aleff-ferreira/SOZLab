@@ -1,6 +1,6 @@
 {
   "label": "baseline",
-  "engine": "D:\\sozlab\\.baseline\\src\\engine",
+  "engine": ".baseline/src/engine",
   "mdanalysis": "2.9.0",
   "python": "3.12.10",
   "platform": "win32",

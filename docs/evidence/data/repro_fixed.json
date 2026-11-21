@@ -1,6 +1,6 @@
 {
   "label": "fixed",
-  "engine": "D:\\sozlab\\src\\engine",
+  "engine": "src/engine",
   "mdanalysis": "2.9.0",
   "python": "3.12.10",
   "platform": "win32",
